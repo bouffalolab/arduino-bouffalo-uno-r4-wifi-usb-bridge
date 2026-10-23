@@ -1,11 +1,17 @@
 // BL 版 UNO R4 WiFi USB bridge（BL616CL 替代 ESP32-S3）。
-// 当前功能：电脑看到的 USB 串口（Serial）与 RA4M1 用户串口（Serial1，uart0 GPIO34/35 经 U4 接 SCI9）双向透传。
+// 当前功能：
+// - 电脑看到的 USB 串口（Serial）与 RA4M1 用户串口（Serial1，uart0 GPIO34/35 经 U4 接 SCI9）双向透传；
+// - RA4M1 WiFiS3 的 AT 命令（Serial2，uart1 GPIO6/7 经 U4 接 SCI1）：联网与 TCP 客户端，见 at_server.h。
 // 电脑设置的波特率按官方 bridge 语义处理：
 // - 1200：MD 高，RESET 双击，RA4M1 进 Arduino bootloader（IDE/arduino-cli 经 bossac 上传）；
 // - 2400：MD 低，RESET 一次，RA4M1 进 ROM 下载模式；MD 保持低，直到下一次 1200；
 // - 其他：设为 Serial1 的波特率（帧格式固定 8N1）。
 // 每次处理后清空 RA4M1 发来、尚未转发的数据。1200 由本固件处理，所以关闭 Core 的 1200 bps touch。
 // 构建：arduino-bl 平台，FQBN bouffalolab:bl:unor4wifi_bl616cl；1V1 模组加 -DBRIDGE_MODULE_1V1。
+#include "FreeRTOS.h"
+#include "task.h"
+
+#include "at_server.h"
 
 #define PIN_RA4M1_RESET 3 // ESP_IO4，经 U4 接 RA4M1 RESET
 #if defined(BRIDGE_MODULE_1V1)
@@ -18,6 +24,10 @@
 #define BAUD_BOOTLOADER 1200
 #define BAUD_ROM 2400
 #define USER_RX_BUFFER 8192 // USB 写最多阻塞 100 ms，921600 下约 9 KB
+#define AT_BAUD 115200      // WiFiS3 Modem：Serial2 115200 8N1
+#define AT_RX_BUFFER 8192   // CLIENTSEND 载荷在发往 socket 期间缓存在这里（同上游）
+#define AT_TASK_STACK_SIZE 8192 // 字节
+#define AT_TASK_PRIORITY 1      // 同 Core 的 loop 任务，两者轮流运行
 
 static uint8_t buf[1024];
 
@@ -29,6 +39,16 @@ static uint32_t handled_baud;
 // 只在 loop 中使用
 static uint32_t seen_events;
 static uint32_t applied_baud;
+
+// AT 命令在单独的任务中处理：连接、DNS 等可能等待数秒，不能停住 loop 中的透传。Wi-Fi 调用只在这个任务中
+static void atTask(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        at_serve(Serial2);
+        delay(1);
+    }
+}
 
 static void resetPulse()
 {
@@ -76,6 +96,10 @@ void setup()
     if (Serial.onLineChange(onLineChange)) {
         Serial.setTouchReset(false); // 回调不可用时保留 touch，仍能经 USB 更新本固件
     }
+
+    Serial2.setRxBufferSize(AT_RX_BUFFER);
+    Serial2.begin(AT_BAUD);
+    xTaskCreate(atTask, "at", AT_TASK_STACK_SIZE / sizeof(StackType_t), NULL, AT_TASK_PRIORITY, NULL);
 }
 
 void loop()
