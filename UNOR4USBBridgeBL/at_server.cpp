@@ -449,6 +449,20 @@ static void cmd_remoteport(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, clients[s].remotePort());
 }
 
+/* AT+RESTARTBOOTLOADER：BL616CL 复位进 ROM 下载模式，供更新本固件。上游直接复位、不应答，主机要等满超时；
+   这里先回 OK 并等它发完 */
+static void cmd_restartbootloader(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op != '\0') {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, "");
+    io.flush();
+    resetToBootloader();
+}
+
 static const struct {
     const char *name;
     handler_t handler;
@@ -477,6 +491,7 @@ static const struct {
     { "+FLUSH", cmd_flush },
     { "+REMOTEIP", cmd_remoteip },
     { "+REMOTEPORT", cmd_remoteport },
+    { "+RESTARTBOOTLOADER", cmd_restartbootloader },
 };
 
 /* 一行请求："AT"、"AT+NAME"、"AT+NAME?"、"AT+NAME=args"；不以 "AT" 开头的行忽略 */

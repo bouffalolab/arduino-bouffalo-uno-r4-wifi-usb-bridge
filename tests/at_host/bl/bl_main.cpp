@@ -45,6 +45,13 @@ private:
     }
 };
 
+/* 平台 resetToBootloader 的替身：在 stderr 打标记后退出，run.py 据此判定 AT+RESTARTBOOTLOADER */
+extern "C" void resetToBootloader(void)
+{
+    fprintf(stderr, "RESETTOBOOTLOADER\n");
+    exit(0);
+}
+
 extern "C" int host_main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--early-client") == 0) {

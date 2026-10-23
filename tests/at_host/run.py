@@ -8,7 +8,7 @@
 平台 WiFi 库的 wifi_port、net_port 换成 bl/ 下的主机实现：虚拟 AP、本机 POSIX socket。
 
 两个程序经 socketpair 相连，本脚本另在 127.0.0.1 起回显服务与关闭服务（发 "bye\\n" 后关闭）。ra_host 逐项输出结果，
-本脚本判定；BL 侧进程必须一直存活。另以 bl_host --early-client 单独检查平台 WiFiClient 在 Wi-Fi 初始化前的连接。
+本脚本判定；BL 侧进程必须运行到最后一条 AT+RESTARTBOOTLOADER，由 resetToBootloader 的替身打印标记后退出。另以 bl_host --early-client 单独检查平台 WiFiClient 在 Wi-Fi 初始化前的连接。
 退出码 0 表示全部通过。
 """
 import argparse
@@ -163,9 +163,11 @@ def main():
     rap = subprocess.run([ra, str(a.fileno()), SSID, PASS, str(servers.echo), str(servers.close)],
                          pass_fds=(a.fileno(),), capture_output=True, text=True, timeout=180)
     took = time.monotonic() - start
-    bl_alive = blp.poll() is None
-    blp.terminate()
-    blp.wait()
+    try:
+        bl_rc = blp.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        blp.terminate()
+        bl_rc = blp.wait()
     bl_err.close()
     time.sleep(0.2)
 
@@ -181,7 +183,8 @@ def main():
     n = lambda item: nums(lines, item)  # noqa: E731
 
     check("ra_host 输出到 DONE（%.1f s）" % took, "DONE" in lines)
-    check("BL 侧进程全程存活", bl_alive)
+    check("BL 侧进程运行到 RESTARTBOOTLOADER，调用 resetToBootloader 后退出（rc=%s）" % bl_rc,
+          bl_rc == 0 and err.count("RESETTOBOOTLOADER") == 1)
     check("STATUS0 为 0 且 2 s 内返回（SOFTRESETWIFI 握手，%s）" % v("STATUS0"),
           n("STATUS0") is not None and n("STATUS0")[0] == 0 and n("STATUS0")[1] < 2000)
     check("FW 为 0.1.0（%s）" % v("FW"), v("FW") == ["0.1.0"])
@@ -212,6 +215,8 @@ def main():
     u = n("UNKNOWN")
     check("未知命令 1 s 内失败（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
     check("disconnect 后 status 为 WL_DISCONNECTED（%s）" % v("DISC"), n("DISC") == [6])
+    r = n("RESTARTBOOT")
+    check("RESTARTBOOTLOADER 复位前应答 OK、1 s 内返回（%s）" % r, r is not None and r[0] == 1 and r[1] < 1000)
 
     failed = [name for name, ok in results if not ok]
     print("%d 项检查，%d 项失败；编译目录 %s" % (len(results), len(failed), out))

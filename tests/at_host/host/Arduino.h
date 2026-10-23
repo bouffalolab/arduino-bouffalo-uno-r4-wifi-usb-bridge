@@ -14,6 +14,15 @@
 #define synchronized
 
 #ifdef __cplusplus
+extern "C" {
+#endif
+/* 平台 Arduino.h 的 BL616CL 接口；主机替身在 bl/bl_main.cpp */
+void resetToBootloader(void) __attribute__((noreturn));
+#ifdef __cplusplus
+}
+#endif
+
+#ifdef __cplusplus
 using namespace arduino;
 
 /* 读不等待；写阻塞到全部发出（socketpair 缓冲足够大，对端总在读） */

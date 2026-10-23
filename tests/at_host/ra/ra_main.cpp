@@ -158,6 +158,13 @@ extern "C" int host_main(int argc, char **argv)
 
     WiFi.disconnect();
     printf("DISC %d\n", WiFi.status());
+    {
+        // 最后一条：BL 侧应答后复位进下载模式（主机替身退出进程）
+        std::string res;
+        t = millis();
+        bool ok = modem.write(std::string(PROMPT(_RESTART_BOOTLOADER)), res, "%s", CMD(_RESTART_BOOTLOADER));
+        printf("RESTARTBOOT %d %lu\n", ok, millis() - t);
+    }
     printf("DONE\n");
     return 0;
 }
