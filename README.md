@@ -25,6 +25,6 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 
 | 功能 | 状态 | 证据或说明 |
 | --- | --- | --- |
-| USB 串口（`Serial`）与 RA4M1 用户串口（`Serial1`，uart0 GPIO34/35 经 U4 接 SCI9）双向透传；其他波特率设为 `Serial1` 的波特率（8N1），每次改动后清空未转发的接收数据 | experimental | 首块板（1V0），Linux：以 FT232 代替 RA4M1 接在 GPIO34/35，115200、9600、230400、921600 下双向各 1–8 KB 逐字节一致；921600 下双向同时各 64 KB 连续 3 轮一致；重新打开端口后跟随波特率 |
-| 1200：MD 高、RESET 双击，RA4M1 进 bootloader；2400：MD 低、RESET 一次，RA4M1 进 ROM 下载模式，MD 保持低到下一次 1200（同官方 bridge） | experimental | 已编译；1200 时 BL616CL 不进下载模式已实测；RA4M1 一侧的效果和经 bridge 给 RA4M1 上传未测 |
+| USB 串口（`Serial`）与 RA4M1 用户串口（`Serial1`，uart0 GPIO34/35 经 U4 接 SCI9）双向透传；其他波特率设为 `Serial1` 的波特率（8N1），每次改动后清空未转发的接收数据 | experimental | 首块板（1V0），Linux：以 FT232 代替 RA4M1 接在 GPIO34/35，115200、9600、230400、921600 下双向各 1–8 KB 逐字节一致；921600 下双向同时各 64 KB 连续 3 轮一致；重新打开端口后跟随波特率。接 RA4M1（R47/R48 补焊后）：115200 下回显 50 字节、2 KB 一致 |
+| 1200：MD 高、RESET 双击，RA4M1 进 bootloader；2400：MD 低、RESET 一次，RA4M1 进 ROM 下载模式，MD 保持低到下一次 1200（同官方 bridge） | experimental | 首块板（1V0），Linux：arduino-cli（renesas 1.6.0，unor4wifi）经 bridge 给 RA4M1 上传并运行，bossac 以 921600 连上 bootloader；2400 后 RA4M1 ROM 应答同步（0x00→0x00、0x55→0xC3），再经 1200 上传恢复；1200 时 BL616CL 不进下载模式 |
 | AT 命令、Wi-Fi、CMSIS-DAP、`AT+RESTARTBOOTLOADER` | unimplemented | — |
