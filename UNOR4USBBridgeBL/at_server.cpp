@@ -61,8 +61,7 @@ static int split(char *args, char **argv, int max)
     char *p = args;
     while (n < max) {
         argv[n++] = p;
-        p = strchr(p, ',');
-        if (p == NULL) {
+        if (n == max || (p = strchr(p, ',')) == NULL) {
             break;
         }
         *p++ = '\0';
