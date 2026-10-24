@@ -3,6 +3,7 @@
  * 网络名与密码取自环境变量 AT_HOST_SSID、AT_HOST_PASS；连接 300 ms 后出结果，地址都在本机回环上。
  * 失败时的状态码与实板一致：密码错误 2，找不到 SSID 12。
  * 扫描：第一次给出 scan_table 中按 RSSI 排好的前 max 个，第二次 0 个，之后都失败；run.py 按同一张表核对。
+ * 地址：DHCP 时报 FAKE_*；静态地址与 setDNS 的规则同平台 wifi_port.c，只改报出的地址（socket 仍在回环上）。
  */
 #include <arpa/inet.h>
 #include <stdlib.h>
@@ -21,6 +22,23 @@ static enum wifi_port_state outcome;
 static bool connecting;
 static uint64_t ready_at;
 static uint16_t last_status;
+static uint32_t cfg_ip, cfg_mask, cfg_gw, cfg_dns[2]; /* 网络字节序；cfg_ip 为 0 时用 DHCP */
+static uint32_t dns_now[2];
+
+static void use_dhcp_dns(void)
+{
+    dns_now[0] = htonl(FAKE_DNS);
+    dns_now[1] = 0;
+}
+
+static void apply_static_dns(void)
+{
+    for (int i = 0; i < 2; i++) {
+        if (cfg_dns[i] != 0) {
+            dns_now[i] = cfg_dns[i];
+        }
+    }
+}
 
 static uint64_t now_ms(void)
 {
@@ -34,6 +52,13 @@ static void settle(void)
     if (connecting && now_ms() >= ready_at) {
         connecting = false;
         state = outcome;
+        if (state == WIFI_PORT_CONNECTED) {
+            if (cfg_ip != 0) {
+                apply_static_dns();
+            } else {
+                use_dhcp_dns();
+            }
+        }
     }
 }
 
@@ -95,14 +120,52 @@ void wifi_port_last_error(uint16_t *status, uint16_t *reason)
 void wifi_port_ip(uint32_t *ip, uint32_t *mask, uint32_t *gw)
 {
     bool up = wifi_port_state() == WIFI_PORT_CONNECTED;
-    *ip = up ? htonl(FAKE_IP) : 0;
-    *mask = up ? htonl(FAKE_MASK) : 0;
-    *gw = up ? htonl(FAKE_GW) : 0;
+    *ip = !up ? 0 : cfg_ip != 0 ? cfg_ip : htonl(FAKE_IP);
+    *mask = !up ? 0 : cfg_ip != 0 ? cfg_mask : htonl(FAKE_MASK);
+    *gw = !up ? 0 : cfg_ip != 0 ? cfg_gw : htonl(FAKE_GW);
+}
+
+void wifi_port_ip_config(uint32_t ip, uint32_t mask, uint32_t gw, uint32_t dns1, uint32_t dns2)
+{
+    cfg_ip = ip;
+    cfg_mask = mask;
+    cfg_gw = gw;
+    cfg_dns[0] = ip != 0 ? dns1 : 0;
+    cfg_dns[1] = ip != 0 ? dns2 : 0;
+    if (wifi_port_state() == WIFI_PORT_CONNECTED) {
+        if (ip != 0) {
+            apply_static_dns();
+        } else {
+            use_dhcp_dns();
+        }
+    }
+}
+
+void wifi_port_set_dns(uint32_t dns1, uint32_t dns2)
+{
+    bool up = wifi_port_state() == WIFI_PORT_CONNECTED;
+    if (cfg_ip == 0) {
+        if (up) {
+            uint32_t ip, mask, gw;
+            wifi_port_ip(&ip, &mask, &gw);
+            wifi_port_ip_config(ip, mask, gw, dns1, dns2);
+        }
+        return;
+    }
+    if (dns1 != 0) {
+        cfg_dns[0] = dns1;
+    }
+    if (dns2 != 0) {
+        cfg_dns[1] = dns2;
+    }
+    if (up) {
+        apply_static_dns();
+    }
 }
 
 uint32_t wifi_port_dns(int index)
 {
-    return wifi_port_state() == WIFI_PORT_CONNECTED && index == 0 ? htonl(FAKE_DNS) : 0;
+    return wifi_port_state() == WIFI_PORT_CONNECTED && index >= 0 && index < 2 ? dns_now[index] : 0;
 }
 
 int32_t wifi_port_rssi(void)

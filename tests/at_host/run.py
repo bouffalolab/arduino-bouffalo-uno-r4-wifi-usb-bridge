@@ -373,6 +373,17 @@ def main():
     check("end() 后不再接受连接（%s，%s）" % (v("SRVEND"), peer.get("after_end")),
           n("SRVEND") == [0] and peer.get("after_end") == "refused")
     check("4 个服务端成功、第 5 个失败、释放后可再用（%s）" % v("SRVLIMIT"), n("SRVLIMIT") == [4, 0, 1])
+    check("已连接时 config 立即生效：地址、网关、掩码、DNS 与参数相同，状态 3（%s）" % v("SETIP"),
+          v("SETIP") == ["127.0.0.2", "127.0.0.4", "255.255.0.0", "127.0.0.3", "3"])
+    check("setDNS 两个 DNS，地址不变（%s）" % v("SETDNS"), v("SETDNS") == ["127.0.0.2", "127.0.0.5", "127.0.0.6"])
+    check("断开后再 begin 仍用静态地址与 DNS（%s）" % v("SETIPAGAIN"), v("SETIPAGAIN") == ["3", "127.0.0.2", "127.0.0.5"])
+    check("config(地址)：网关 x.y.z.1、/24、DNS0 用网关，DNS1 不变（%s）" % v("SETIP1"),
+          v("SETIP1") == ["127.0.0.9", "127.0.0.1", "255.255.255.0", "127.0.0.1", "127.0.0.6"])
+    check("静态地址时 TCP 照常（%s）" % v("STATICECHO"), n("STATICECHO") == [1, 100, 100, 1])
+    check("SETIP 参数不足或地址不合法时 ERROR（%s）" % v("SETIPBAD"), n("SETIPBAD") == [0, 0])
+    check("config(0.0.0.0) 恢复 DHCP 的地址与 DNS（%s）" % v("SETIPDHCP"),
+          v("SETIPDHCP") == ["127.0.0.1", "127.0.0.1", "127.0.0.53"])
+    check("SOFTRESETWIFI 恢复 DHCP（%s）" % v("SOFTRESETDHCP"), v("SOFTRESETDHCP") == ["1", "3", "127.0.0.1"])
     u = n("UNKNOWN")
     check("未知命令 1 s 内失败（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
     check("disconnect 后 status 为 WL_DISCONNECTED（%s）" % v("DISC"), n("DISC") == [6])

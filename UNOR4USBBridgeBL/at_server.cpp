@@ -232,6 +232,7 @@ static void cmd_softreset(Stream &io, const char *name, char op, char *args)
     if (sta_started) {
         WiFi.disconnect();
     }
+    WiFi.config(IPAddress(0, 0, 0, 0)); /* 恢复 DHCP，同上游 */
     wifi_mode = 0;
 }
 
@@ -304,6 +305,30 @@ static void cmd_ipsta(Stream &io, const char *name, char op, char *args)
         default: ip = WiFi.dnsIP(n - 3); break;
     }
     reply(io, name, ip.toString().c_str());
+}
+
+/*
+ * AT+SETIP=<地址>,<网关>,<掩码>[,<DNS1>[,<DNS2>]]（同上游，WiFiS3 的 config、setDNS 总是给 5 个）：静态地址，
+ * 地址为 0.0.0.0 时恢复 DHCP；为 0.0.0.0 的 DNS 不改
+ */
+static void cmd_setip(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[5];
+    IPAddress ip[5];
+    int n = op == '=' ? split(args, argv, 5) : 0;
+    bool ok = n >= 3;
+    for (int i = 0; i < n && ok; i++) {
+        ok = ip[i].fromString(argv[i]);
+    }
+    if (!ok) {
+        reply_error(io, name);
+        return;
+    }
+    WiFi.config(ip[0], ip[3], ip[1], ip[2]);
+    if (n == 5 && ip[0] != IPAddress(0, 0, 0, 0)) {
+        WiFi.setDNS(ip[3], ip[4]);
+    }
+    reply(io, name, "");
 }
 
 static void cmd_getssid(Stream &io, const char *name, char op, char *args)
@@ -1027,6 +1052,7 @@ static const struct {
     { "+BEGINSTA", cmd_beginsta },
     { "+GETSTATUS", cmd_getstatus },
     { "+IPSTA", cmd_ipsta },
+    { "+SETIP", cmd_setip },
     { "+GETSSID", cmd_getssid },
     { "+GETRSSI", cmd_getrssi },
     { "+GETBSSID", cmd_getbssid },

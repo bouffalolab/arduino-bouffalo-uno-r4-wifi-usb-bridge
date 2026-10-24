@@ -352,6 +352,49 @@ static void server_tests(const uint16_t *ports)
 }
 
 /* 输出 "<项> <个数> <毫秒>"，再每个网络一行 "<项>AP <序号>|<ssid>|<bssid>|<rssi>|<信道>|<加密>" */
+static const char *ip_s(IPAddress a)
+{
+    static char buf[8][16]; /* 一行 printf 最多用 5 个 */
+    static int k;
+    char *p = buf[k++ % 8];
+    snprintf(p, 16, "%s", a.toString().c_str());
+    return p;
+}
+
+/* 已连上（DHCP）时调用；结束时恢复 DHCP 并重新连上 */
+static void staticip_tests(const char *ssid, const char *pass, uint16_t echo_port)
+{
+    std::string res;
+    WiFi.config(IPAddress(127, 0, 0, 2), IPAddress(127, 0, 0, 3), IPAddress(127, 0, 0, 4), IPAddress(255, 255, 0, 0));
+    printf("SETIP %s %s %s %s %d\n", ip_s(WiFi.localIP()), ip_s(WiFi.gatewayIP()), ip_s(WiFi.subnetMask()),
+           ip_s(WiFi.dnsIP(0)), WiFi.status());
+    WiFi.setDNS(IPAddress(127, 0, 0, 5), IPAddress(127, 0, 0, 6));
+    printf("SETDNS %s %s %s\n", ip_s(WiFi.localIP()), ip_s(WiFi.dnsIP(0)), ip_s(WiFi.dnsIP(1)));
+    WiFi.disconnect();
+    int st = WiFi.begin(ssid, pass);
+    printf("SETIPAGAIN %d %s %s\n", st, ip_s(WiFi.localIP()), ip_s(WiFi.dnsIP(0)));
+    WiFi.config(IPAddress(127, 0, 0, 9));
+    printf("SETIP1 %s %s %s %s %s\n", ip_s(WiFi.localIP()), ip_s(WiFi.gatewayIP()), ip_s(WiFi.subnetMask()),
+           ip_s(WiFi.dnsIP(0)), ip_s(WiFi.dnsIP(1)));
+    {
+        WiFiClient c;
+        int r = c.connect(loopback, echo_port);
+        echo("STATICECHO", c, r, 100);
+        c.stop();
+    }
+    bool few = modem.write(std::string(PROMPT(_SETIP)), res, "%s%s\r\n", CMD_WRITE(_SETIP), "127.0.0.2,127.0.0.1");
+    bool bad = modem.write(std::string(PROMPT(_SETIP)), res, "%s%s\r\n", CMD_WRITE(_SETIP),
+                           "127.0.0.x,127.0.0.1,255.0.0.0");
+    printf("SETIPBAD %d %d\n", few, bad);
+    WiFi.config(IPAddress(0, 0, 0, 0));
+    printf("SETIPDHCP %s %s %s\n", ip_s(WiFi.localIP()), ip_s(WiFi.gatewayIP()), ip_s(WiFi.dnsIP(0)));
+    /* SOFTRESETWIFI 恢复 DHCP（WiFiS3 只在第一次调用时发，这里直接发） */
+    WiFi.config(IPAddress(127, 0, 0, 2));
+    bool reset = modem.write(std::string(PROMPT(_SOFTRESETWIFI)), res, "%s", CMD(_SOFTRESETWIFI));
+    st = WiFi.begin(ssid, pass);
+    printf("SOFTRESETDHCP %d %d %s\n", reset, st, ip_s(WiFi.localIP()));
+}
+
 static void scan(const char *item)
 {
     unsigned long t = millis();
@@ -491,6 +534,7 @@ extern "C" int host_main(int argc, char **argv)
     ssl_tests(echo_port, close_port);
     udp_tests(udp_echo_port, udp_local_port);
     server_tests(server_ports);
+    staticip_tests(ssid, pass, echo_port);
     {
         std::string res;
         t = millis();
