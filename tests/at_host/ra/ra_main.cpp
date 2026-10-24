@@ -434,6 +434,7 @@ extern "C" int host_main(int argc, char **argv)
     int st = WiFi.status();
     printf("STATUS0 %d %lu\n", st, millis() - t);
     printf("FW %s\n", WiFi.firmwareVersion());
+    printf("FWU32 %06lx\n", (unsigned long)WiFi.firmwareVersionU32());
 
     /* 联网之前：连接、解析都应失败，BL 侧不能因此出错 */
     {

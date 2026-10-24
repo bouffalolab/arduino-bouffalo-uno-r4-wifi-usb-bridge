@@ -295,6 +295,7 @@ def main():
     check("STATUS0 为 0 且 2 s 内返回（SOFTRESETWIFI 握手，%s）" % v("STATUS0"),
           n("STATUS0") is not None and n("STATUS0")[0] == 0 and n("STATUS0")[1] < 2000)
     check("FW 为 0.1.0（%s）" % v("FW"), v("FW") == ["0.1.0"])
+    check("firmwareVersionU32 为 0x000100（%s）" % v("FWU32"), v("FWU32") == ["000100"])
     check("联网前连接失败（%s）" % v("EARLYCONNECT"), n("EARLYCONNECT") == [0])
     check("联网前解析失败（%s）" % v("EARLYDNS"), n("EARLYDNS") == [0])
     check("联网前 ping 返回负值（%s）" % v("EARLYPING"), n("EARLYPING") is not None and n("EARLYPING")[0] < 0)

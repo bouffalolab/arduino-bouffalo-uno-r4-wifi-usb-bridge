@@ -246,6 +246,22 @@ static void cmd_fwversion(Stream &io, const char *name, char op, char *args)
     reply(io, name, FW_VERSION);
 }
 
+/* AT+FWVERSION_U32?：FW_VERSION 三段各一个原始字节再加 0（同上游 cmds_esp_generic.h），WiFiS3 取前 3 字节 */
+static void cmd_fwversion_u32(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    unsigned v[3];
+    if (op != '?' || sscanf(FW_VERSION, "%u.%u.%u", &v[0], &v[1], &v[2]) != 3) {
+        reply_error(io, name);
+        return;
+    }
+    const uint8_t b[4] = { (uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], 0 };
+    io.print(name);
+    io.print(": ");
+    io.write(b, sizeof(b));
+    io.print("\r\nOK\r\n");
+}
+
 /* 只支持 STA（1）；AP 未实现 */
 static void cmd_wifimode(Stream &io, const char *name, char op, char *args)
 {
@@ -1048,6 +1064,7 @@ static const struct {
 } commands[] = {
     { "+SOFTRESETWIFI", cmd_softreset },
     { "+FWVERSION", cmd_fwversion },
+    { "+FWVERSION_U32", cmd_fwversion_u32 },
     { "+WIFIMODE", cmd_wifimode },
     { "+BEGINSTA", cmd_beginsta },
     { "+GETSTATUS", cmd_getstatus },
