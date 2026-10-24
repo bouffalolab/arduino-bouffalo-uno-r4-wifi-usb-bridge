@@ -11,6 +11,18 @@
 #define FAKE_MAC   { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 }
 #define FAKE_BSSID { 0x02, 0x00, 0x00, 0x00, 0x00, 0xAA }
 #define FAKE_HOST  "echo.test" /* 唯一能解析的域名，解析到 FAKE_IP */
+/* TLS 替身：根证书束只认 FAKE_HOST；setCACert 给的 PEM 必须与 FAKE_CA_PEM 逐字节相同（本机生成的测试 CA） */
+#define FAKE_CA_PEM \
+    "-----BEGIN CERTIFICATE-----\n" \
+    "MIIBbjCCARSgAwIBAgIUPWXV8T0fBmdE0eKUp621QrZsl1AwCgYIKoZIzj0EAwIw\n" \
+    "HTEbMBkGA1UEAwwSYXJkdWluby1ibCB0ZXN0IENBMB4XDTI2MTAyNDA5MTcyM1oX\n" \
+    "DTM2MTAyMTA5MTcyM1owHTEbMBkGA1UEAwwSYXJkdWluby1ibCB0ZXN0IENBMFkw\n" \
+    "EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYUH5p3Y4wObRzSWgxo7puKc5lFSQ+ATt\n" \
+    "VuhNDColXMxc3bMbcIOqWzjuuqmU/BsM2Hkxzg8NbRXWag030HQJ/qMyMDAwHQYD\n" \
+    "VR0OBBYEFPz7hy3GviF2JKYO5HoaH+Dwf49tMA8GA1UdEwEB/wQFMAMBAf8wCgYI\n" \
+    "KoZIzj0EAwIDSAAwRQIgLjU9e7qNScnRl93FNewDLeNt6l7i9NV0pjQfrfojXtEC\n" \
+    "IQCsjHa00XSN0CA39iEokf62PtKPcgb3ok+poS9dD9Pm+g==\n" \
+    "-----END CERTIFICATE-----\n"
 
 #ifdef __cplusplus
 extern "C" {

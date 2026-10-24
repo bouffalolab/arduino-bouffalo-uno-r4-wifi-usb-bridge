@@ -26,7 +26,8 @@ BRIDGE = os.path.normpath(os.path.join(HERE, "../.."))
 SSID = "testnet"
 PASS = "pa,ss wo,rd"  # 含逗号与空格：BEGINSTA 以第一个逗号分开网络名与密码
 API_SOURCES = ("String.cpp", "Print.cpp", "Stream.cpp", "IPAddress.cpp", "Common.cpp")
-WIFIS3_SOURCES = ("Modem.cpp", "WiFi.cpp", "WiFiClient.cpp", "WiFiServer.cpp", "WiFiUdp.cpp", "StringHelpers.cpp")
+WIFIS3_SOURCES = ("Modem.cpp", "WiFi.cpp", "WiFiClient.cpp", "WiFiServer.cpp", "WiFiUdp.cpp", "WiFiSSLClient.cpp",
+                  "StringHelpers.cpp")
 
 results = []
 
@@ -57,7 +58,11 @@ def compile_all(out, sources, includes, defines=()):
     for src in sources:
         obj = os.path.join(out, "%d-%s.o" % (len(objs), os.path.basename(src)))
         c = src.endswith(".c") or src.endswith(".impl")
-        cmd = ["gcc" if c else "g++", "-c", "-g", "-O1", "-Wall", "-std=gnu11" if c else "-std=gnu++17"]
+        std = "-std=gnu11" if c else "-std=gnu++17"
+        if src.endswith("WiFiS3/src/WiFiSSLClient.cpp"):
+            # 该文件 using namespace std，主机 g++ 13 下 std::byte 与 Arduino 的 byte 冲突；它不用 C++17 特性
+            std = "-std=gnu++14"
+        cmd = ["gcc" if c else "g++", "-c", "-g", "-O1", "-Wall", std]
         cmd += ["-x", "c"] if src.endswith(".impl") else []
         cmd += [] if c else ["-include", "stdlib.h"]  # api/Common.h 声明的 atexit 不带 noexcept，先让 glibc 的声明生效
         cmd += ["-I" + i for i in includes] + ["-D" + d for d in defines] + [src, "-o", obj]
@@ -78,9 +83,11 @@ def build(args, out):
     common += [os.path.join(api, "api/deprecated-avr-comp/avr/dtostrf.c.impl")]
     common += [os.path.join(api, "api", s) for s in API_SOURCES]
 
-    bl_src = common + [os.path.join(HERE, "bl", f) for f in ("bl_main.cpp", "fake_wifi_port.c", "fake_net_port.c")]
+    bl_src = common + [os.path.join(HERE, "bl", f) for f in ("bl_main.cpp", "fake_wifi_port.c", "fake_net_port.c",
+                                                              "fake_tls_port.c")]
     bl_src += [os.path.join(BRIDGE, "UNOR4USBBridgeBL/at_server.cpp")]
-    bl_src += [os.path.join(wifi, f) for f in ("WiFi.cpp", "WiFiClient.cpp", "WiFiServer.cpp", "WiFiUdp.cpp")]
+    bl_src += [os.path.join(wifi, f) for f in ("WiFi.cpp", "WiFiClient.cpp", "WiFiSSLClient.cpp", "WiFiServer.cpp",
+                                                  "WiFiUdp.cpp")]
     bl_inc = [host, os.path.join(HERE, "bl"), wifi, os.path.join(BRIDGE, "UNOR4USBBridgeBL"), api]
     bl_out = os.path.join(out, "bl")
     os.makedirs(bl_out, exist_ok=True)
@@ -320,6 +327,19 @@ def main():
     check("setConnectionTimeout 后的连接命令可用（%s）" % v("ECHOTIMEOUT"), n("ECHOTIMEOUT") == [1, 1, 1, 1])
     check("对端关闭后读完数据、connected() 为 0（%s）" % v("PEERCLOSE"), n("PEERCLOSE") == [1, 4, 0])
     check("8 个 socket 成功、第 9 个失败、释放后可再用（%s）" % v("SOCKETS"), n("SOCKETS") == [8, 0, 1])
+    check("TLS：按域名用根证书束连接，3000 字节二进制回显一致（%s）" % v("SSLECHO"), n("SSLECHO") == [1, 3000, 3000, 1])
+    r = v("SSLREMOTE")
+    check("TLS remoteIP、remotePort（%s）" % r, r is not None and r[0] == "127.0.0.1" and r[1] == r[2])
+    check("TLS available 后 peek 为首字节 'p'，read 读回 2 字节（%s）" % v("SSLPEEK"), n("SSLPEEK") == [112, 2, 1])
+    check("TLS stop 后 connected() 为 0（%s）" % v("SSLSTOP"), n("SSLSTOP") == [0])
+    check("TLS 按地址连接时根证书束不认，连接失败（%s）" % v("SSLUNTRUSTED"), n("SSLUNTRUSTED") == [0])
+    check("setCACert 的 PEM 逐字节传到平台，连接成功、100 字节回显一致（%s）" % v("SSLCA"), n("SSLCA") == [1, 100, 100, 1])
+    check("错误的 CA 连接失败；setCACert(nullptr) 后恢复用根证书束（%s）" % v("SSLCAFLOW"), n("SSLCAFLOW") == [0, 1])
+    check("setEccSlot 后连接失败（无安全芯片），载荷读完、之后带超时的连接正常（%s %s）" % (v("SSLECC"), v("SSLTIMEOUT")),
+          n("SSLECC") == [0] and n("SSLTIMEOUT") == [1, 1, 1, 1])
+    check("TLS 对端关闭后读完数据、connected() 为 0（%s）" % v("SSLPEERCLOSE"), n("SSLPEERCLOSE") == [1, 4, 0])
+    check("SSL 编号不能用于 CLIENT 命令，TCP 编号不能用于 SSL 命令（%s）" % v("SSLMIX"), n("SSLMIX") == [1, 0, 0])
+    check("8 个 TLS 连接成功、第 9 个失败、释放后可再用（%s）" % v("SSLSOCKETS"), n("SSLSOCKETS") == [8, 0, 1])
     check("联网前 WiFiUDP.begin 失败（%s）" % v("EARLYUDP"), n("EARLYUDP") == [0])
     check("UDP：begin、beginPacket、分两次 write 1400 字节（含 0x00、CRLF、'|'）、endPacket，回显 1400 字节，"
           "peek 为首字节、available 为全长、每次 500 字节读回一致（%s）" % v("UDPECHO"),

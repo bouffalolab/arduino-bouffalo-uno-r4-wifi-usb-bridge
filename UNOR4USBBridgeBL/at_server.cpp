@@ -12,6 +12,9 @@
 #define MAX_UDP            4       /* 同上游：UDPBEGIN 分配 0–3，与 TCP 的编号各自独立 */
 #define MAX_SERVERS        4       /* 同上游：BEGINSERVER 分配 0–3 */
 #define SERVER_SOCK_BASE   1000    /* 同上游：服务端接入的连接编号 1000–1007，走 CLIENT* 命令 */
+#define MAX_SSL            8       /* 同上游：SSLBEGINCLIENT 分配 2000–2007 */
+#define SSL_SOCK_BASE      2000
+#define CA_MAX             16384   /* SETCAROOT 的 PEM 上限 */
 #define CONNECT_TIMEOUT_MS 8000    /* WiFiS3 每条命令等 10 s，连接要在此之前应答 */
 #define PAYLOAD_TIMEOUT_MS 1000    /* CLIENTSEND 载荷两段之间的最长间隔 */
 #define RECV_MAX           1023    /* WiFiS3 每次 CLIENTRECEIVE 最多要 1023 字节 */
@@ -32,6 +35,9 @@ static WiFiUDP udps[MAX_UDP];
 static bool udp_allocated[MAX_UDP];
 static WiFiServer servers[MAX_SERVERS];
 static bool server_allocated[MAX_SERVERS];
+static WiFiSSLClient ssls[MAX_SSL];
+static bool ssl_allocated[MAX_SSL];
+static char *ssl_ca[MAX_SSL]; /* SETCAROOT 给的 PEM（'\0' 结尾）；为空时用根证书束 */
 /* 服务端接入的连接，编号 SERVER_SOCK_BASE + i；server 为 -1 表示空位。accepted 为假的由 SERVERAVAILABLE 收下，
    SERVERWRITE 发给它们（同上游）；为真的由 SERVERACCEPT 交给主机 */
 static struct {
@@ -105,10 +111,25 @@ static bool parse_long(const char *s, long *value)
     return end != s && *end == '\0';
 }
 
-/* 已分配的连接号：BEGINCLIENT 的 0–7，或服务端接入的 1000–1007；否则 -1 */
-static int socket_arg(const char *s)
+/* SSLBEGINCLIENT 分配的连接号 2000–2007 对应的位置，否则 -1 */
+static int ssl_slot(const char *s)
 {
     long v;
+    long i = parse_long(s, &v) ? v - SSL_SOCK_BASE : -1;
+    return i >= 0 && i < MAX_SSL && ssl_allocated[i] ? (int)i : -1;
+}
+
+/*
+ * 命令参数中的已分配连接号，否则 -1。SSL 命令（名称以 "+SSL" 开头）与 CLIENT 类命令共用处理函数，
+ * 前者只接受 SSLBEGINCLIENT 的 2000–2007，后者只接受 BEGINCLIENT 的 0–7 与服务端接入的 1000–1007
+ */
+static int socket_arg(const char *name, const char *s)
+{
+    long v;
+    if (strncmp(name, "+SSL", 4) == 0) {
+        int i = ssl_slot(s);
+        return i >= 0 ? SSL_SOCK_BASE + i : -1;
+    }
     if (!parse_long(s, &v)) {
         return -1;
     }
@@ -121,6 +142,9 @@ static int socket_arg(const char *s)
 
 static WiFiClient &client_of(int s)
 {
+    if (s >= SSL_SOCK_BASE) {
+        return ssls[s - SSL_SOCK_BASE];
+    }
     return s < SERVER_SOCK_BASE ? clients[s] : conns[s - SERVER_SOCK_BASE].client;
 }
 
@@ -129,8 +153,12 @@ static void close_socket(int s)
     client_of(s).stop();
     if (s < SERVER_SOCK_BASE) {
         allocated[s] = false;
-    } else {
+    } else if (s < SSL_SOCK_BASE) {
         conns[s - SERVER_SOCK_BASE].server = -1;
+    } else {
+        ssl_allocated[s - SSL_SOCK_BASE] = false;
+        free(ssl_ca[s - SSL_SOCK_BASE]);
+        ssl_ca[s - SSL_SOCK_BASE] = nullptr;
     }
 }
 
@@ -194,6 +222,9 @@ static void cmd_softreset(Stream &io, const char *name, char op, char *args)
     for (int v = 0; v < MAX_SERVERS; v++) {
         servers[v].end();
         server_allocated[v] = false;
+    }
+    for (int i = 0; i < MAX_SSL; i++) {
+        close_socket(SSL_SOCK_BASE + i);
     }
     for (int u = 0; u < MAX_UDP; u++) {
         close_udp(u);
@@ -413,18 +444,21 @@ static void cmd_beginclient(Stream &io, const char *name, char op, char *args)
     reply_error(io, name);
 }
 
-/* 主机名或点分地址都经 WiFiClient::connect(host) 解析 */
+/* 主机名或点分地址都经 connect(host) 解析；SSL 连接先设好 SETCAROOT 给的证书。服务端接入的连接不能再连 */
 static void connect_socket(Stream &io, const char *name, char **argv, long timeout_ms)
 {
     long port;
-    int s = socket_arg(argv[0]);
-    if (s < 0 || s >= MAX_SOCKETS || !parse_long(argv[2], &port) || port < 1 || port > 65535 ||
-        WiFi.status() != WL_CONNECTED) {
+    int s = socket_arg(name, argv[0]);
+    if (s < 0 || (s >= SERVER_SOCK_BASE && s < SSL_SOCK_BASE) || !parse_long(argv[2], &port) || port < 1 ||
+        port > 65535 || WiFi.status() != WL_CONNECTED) {
         reply_error(io, name);
         return;
     }
-    clients[s].setConnectionTimeout(timeout_ms);
-    if (!clients[s].connect(argv[1], (uint16_t)port)) {
+    if (s >= SSL_SOCK_BASE) {
+        ssls[s - SSL_SOCK_BASE].setCACert(ssl_ca[s - SSL_SOCK_BASE]);
+    }
+    client_of(s).setConnectionTimeout(timeout_ms);
+    if (!client_of(s).connect(argv[1], (uint16_t)port)) {
         reply_error(io, name);
         return;
     }
@@ -466,7 +500,7 @@ static void cmd_clientsend(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    int s = socket_arg(argv[0]);
+    int s = socket_arg(name, argv[0]);
     if (read_payload(io, left, s >= 0 ? &client_of(s) : nullptr)) {
         io.print("OK\r\n");
     } else {
@@ -476,7 +510,7 @@ static void cmd_clientsend(Stream &io, const char *name, char op, char *args)
 
 static void cmd_available(Stream &io, const char *name, char op, char *args)
 {
-    int s = op == '=' ? socket_arg(args) : -1;
+    int s = op == '=' ? socket_arg(name, args) : -1;
     if (s < 0) {
         reply_error(io, name);
         return;
@@ -491,7 +525,7 @@ static void cmd_clientreceive(Stream &io, const char *name, char op, char *args)
     long max;
     int s = -1;
     if (op == '=' && split(args, argv, 2) == 2 && parse_long(argv[1], &max) && max >= 0) {
-        s = socket_arg(argv[0]);
+        s = socket_arg(name, argv[0]);
     }
     if (s < 0) {
         reply_error(io, name);
@@ -511,7 +545,7 @@ static void cmd_clientreceive(Stream &io, const char *name, char op, char *args)
 
 static void cmd_clientconnected(Stream &io, const char *name, char op, char *args)
 {
-    int s = op == '=' ? socket_arg(args) : -1;
+    int s = op == '=' ? socket_arg(name, args) : -1;
     if (s < 0) {
         reply_error(io, name);
         return;
@@ -521,7 +555,7 @@ static void cmd_clientconnected(Stream &io, const char *name, char op, char *arg
 
 static void cmd_clientclose(Stream &io, const char *name, char op, char *args)
 {
-    int s = op == '=' ? socket_arg(args) : -1;
+    int s = op == '=' ? socket_arg(name, args) : -1;
     if (s < 0) {
         reply_error(io, name);
         return;
@@ -533,7 +567,7 @@ static void cmd_clientclose(Stream &io, const char *name, char op, char *args)
 /* 平台 WiFiClient 的发送不经缓冲，flush 无事可做 */
 static void cmd_flush(Stream &io, const char *name, char op, char *args)
 {
-    int s = op == '=' ? socket_arg(args) : -1;
+    int s = op == '=' ? socket_arg(name, args) : -1;
     if (s < 0) {
         reply_error(io, name);
         return;
@@ -544,7 +578,7 @@ static void cmd_flush(Stream &io, const char *name, char op, char *args)
 
 static void cmd_remoteip(Stream &io, const char *name, char op, char *args)
 {
-    int s = op == '=' ? socket_arg(args) : -1;
+    int s = op == '=' ? socket_arg(name, args) : -1;
     if (s < 0) {
         reply_error(io, name);
         return;
@@ -554,12 +588,103 @@ static void cmd_remoteip(Stream &io, const char *name, char op, char *args)
 
 static void cmd_remoteport(Stream &io, const char *name, char op, char *args)
 {
-    int s = op == '=' ? socket_arg(args) : -1;
+    int s = op == '=' ? socket_arg(name, args) : -1;
     if (s < 0) {
         reply_error(io, name);
         return;
     }
     reply_int(io, name, client_of(s).remotePort());
+}
+
+/* 只有 SSL 连接有 PEEK 命令（WiFiS3 的 WiFiClient::peek 只看本地缓冲） */
+static void cmd_peek(Stream &io, const char *name, char op, char *args)
+{
+    int s = op == '=' ? socket_arg(name, args) : -1;
+    if (s < 0) {
+        reply_error(io, name);
+        return;
+    }
+    reply_int(io, name, client_of(s).peek());
+}
+
+static void cmd_sslbeginclient(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op == '\0') {
+        for (int i = 0; i < MAX_SSL; i++) {
+            if (!ssl_allocated[i]) {
+                ssl_allocated[i] = true;
+                reply_int(io, name, SSL_SOCK_BASE + i);
+                return;
+            }
+        }
+    }
+    reply_error(io, name);
+}
+
+/* 把载荷写进定长缓冲，写满即失败 */
+class BufferSink : public Print {
+public:
+    BufferSink(uint8_t *buf, size_t cap) : buf_(buf), cap_(cap) {}
+    size_t write(uint8_t b) override { return write(&b, 1); }
+    size_t write(const uint8_t *p, size_t n) override
+    {
+        if (n > cap_ - len_) {
+            return 0;
+        }
+        memcpy(buf_ + len_, p, n);
+        len_ += n;
+        return n;
+    }
+
+private:
+    uint8_t *buf_;
+    size_t cap_;
+    size_t len_ = 0;
+};
+
+/*
+ * AT+SETCAROOT=<sock>：之后的连接用根证书束，回 "+SETCAROOT: " 加 OK。
+ * AT+SETCAROOT=<sock>,<n> 后紧跟 n 字节 PEM：之后的连接只信任它；同上游只回裸 "OK"，出错也读完 n 字节
+ */
+static void cmd_setcaroot(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[2];
+    long n;
+    int argc = op == '=' ? split(args, argv, 2) : 0;
+    int i = argc >= 1 ? ssl_slot(argv[0]) : -1;
+    if (argc == 1 && i >= 0) {
+        free(ssl_ca[i]);
+        ssl_ca[i] = nullptr;
+        reply(io, name, "");
+        return;
+    }
+    if (argc != 2 || !parse_long(argv[1], &n) || n <= 0) {
+        reply_error(io, name);
+        return;
+    }
+    char *pem = i >= 0 && n <= CA_MAX ? static_cast<char *>(malloc(n + 1)) : nullptr;
+    BufferSink sink(reinterpret_cast<uint8_t *>(pem), n);
+    if (!read_payload(io, n, pem != nullptr ? &sink : nullptr)) {
+        free(pem);
+        reply_error(io, name);
+        return;
+    }
+    pem[n] = '\0';
+    free(ssl_ca[i]);
+    ssl_ca[i] = pem;
+    io.print("OK\r\n");
+}
+
+/* AT+SETECCSLOT=<sock>,<槽>,<n> 加 n 字节证书：本板没有安全芯片，读完载荷后回 ERROR */
+static void cmd_seteccslot(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[3];
+    long n;
+    if (op == '=' && split(args, argv, 3) == 3 && parse_long(argv[2], &n) && n > 0) {
+        read_payload(io, n, nullptr);
+    }
+    reply_error(io, name);
 }
 
 /* 已由 BEGINSERVER 分配的服务端号，否则 -1 */
@@ -921,6 +1046,21 @@ static const struct {
     { "+FLUSH", cmd_flush },
     { "+REMOTEIP", cmd_remoteip },
     { "+REMOTEPORT", cmd_remoteport },
+    /* TLS：除 SSLBEGINCLIENT、SETCAROOT、SETECCSLOT、SSLPEEK 外与 TCP 客户端共用处理函数 */
+    { "+SSLBEGINCLIENT", cmd_sslbeginclient },
+    { "+SETCAROOT", cmd_setcaroot },
+    { "+SETECCSLOT", cmd_seteccslot },
+    { "+SSLCLIENTCONNECTNAME", cmd_clientconnectname },
+    { "+SSLCLIENTCONNECT", cmd_clientconnect },
+    { "+SSLCLIENTSEND", cmd_clientsend },
+    { "+SSLAVAILABLE", cmd_available },
+    { "+SSLCLIENTRECEIVE", cmd_clientreceive },
+    { "+SSLCLIENTCONNECTED", cmd_clientconnected },
+    { "+SSLCLIENTCLOSE", cmd_clientclose },
+    { "+SSLCLIENTFLUSH", cmd_flush },
+    { "+SSLREMOTEIP", cmd_remoteip },
+    { "+SSLREMOTEPORT", cmd_remoteport },
+    { "+SSLPEEK", cmd_peek },
     { "+BEGINSERVER", cmd_beginserver },
     { "+SERVERAVAILABLE", cmd_serveravailable },
     { "+SERVERACCEPT", cmd_serveraccept },

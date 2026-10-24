@@ -77,6 +77,100 @@ static size_t read_packet(WiFiUDP &u, uint8_t *buf, size_t max, size_t chunk)
     return got;
 }
 
+/* TLS：BL 侧的 tls_port 是明文替身（见 bl/fake_tls_port.c），这里检验命令、证书参数传递与编号管理 */
+static void ssl_tests(uint16_t echo_port, uint16_t close_port)
+{
+    {
+        WiFiSSLClient c;
+        int r = c.connect(FAKE_HOST, echo_port);
+        echo("SSLECHO", c, r, 3000);
+        printf("SSLREMOTE %s %u %u\n", c.remoteIP().toString().c_str(), (unsigned)c.remotePort(), (unsigned)echo_port);
+        c.write((const uint8_t *)"pk", 2);
+        unsigned long start = millis();
+        while (c.available() == 0 && millis() - start < 3000) {
+            delay(1);
+        }
+        int peek = c.peek(); /* WiFiS3 的 available() 只问 SSLAVAILABLE，SSLPEEK 看模块侧，应为 'p' */
+        uint8_t two[2] = { 0, 0 };
+        size_t got = read_n(c, two, 2, 3000);
+        printf("SSLPEEK %d %zu %d\n", peek, got, got == 2 && two[0] == 'p' && two[1] == 'k');
+        c.stop();
+        printf("SSLSTOP %d\n", (int)c.connected());
+    }
+    {
+        WiFiSSLClient c;
+        int r = c.connect(loopback, echo_port); /* 按地址字符串校验：根证书束只认 FAKE_HOST */
+        printf("SSLUNTRUSTED %d\n", r);
+        c.stop();
+    }
+    {
+        WiFiSSLClient c;
+        c.setCACert(FAKE_CA_PEM);
+        int r = c.connect(loopback, echo_port);
+        echo("SSLCA", c, r, 100);
+        c.stop();
+        c.setCACert("-----BEGIN CERTIFICATE-----\nnot the test ca\n-----END CERTIFICATE-----\n");
+        int bad = c.connect(loopback, echo_port);
+        c.stop();
+        c.setCACert(nullptr);
+        int bundle = c.connect(FAKE_HOST, echo_port); /* 不带载荷的 SETCAROOT 恢复用根证书束 */
+        c.stop();
+        printf("SSLCAFLOW %d %d\n", bad, bundle);
+    }
+    {
+        static const uint8_t cert[300] = { 0x30, 0x82 };
+        WiFiSSLClient e;
+        e.setEccSlot(0, cert, sizeof(cert));
+        int ecc = e.connect(FAKE_HOST, echo_port);
+        e.stop();
+        WiFiSSLClient c;
+        c.setConnectionTimeout(1500); /* SSLCLIENTCONNECT 带超时 */
+        int r = c.connect(FAKE_HOST, echo_port);
+        echo("SSLTIMEOUT", c, r, 1);
+        printf("SSLECC %d\n", ecc);
+        c.stop();
+    }
+    {
+        WiFiSSLClient c;
+        int r = c.connect(FAKE_HOST, close_port);
+        uint8_t bye[4];
+        size_t got = r ? read_n(c, bye, 4, 3000) : 0;
+        unsigned long start = millis();
+        while (c.connected() && millis() - start < 3000) {
+            delay(10);
+        }
+        printf("SSLPEERCLOSE %d %zu %d\n", r, got, (int)c.connected());
+        c.stop();
+    }
+    {
+        /* SSL 编号不能用于 CLIENT 命令，反之亦然 */
+        WiFiSSLClient sc;
+        WiFiClient tc;
+        int r = sc.connect(FAKE_HOST, echo_port) && tc.connect(loopback, echo_port);
+        std::string res;
+        bool tcp_on_ssl = modem.write(std::string(PROMPT(_AVAILABLE)), res, "%s%d\r\n", CMD_WRITE(_AVAILABLE), 2000);
+        bool ssl_on_tcp = modem.write(std::string(PROMPT(_SSLAVAILABLE)), res, "%s%d\r\n", CMD_WRITE(_SSLAVAILABLE), 0);
+        printf("SSLMIX %d %d %d\n", r, (int)tcp_on_ssl, (int)ssl_on_tcp);
+        sc.stop();
+        tc.stop();
+    }
+    {
+        WiFiSSLClient cs[9];
+        int ok = 0;
+        for (int i = 0; i < 8; i++) {
+            ok += cs[i].connect(FAKE_HOST, echo_port);
+        }
+        int ninth = cs[8].connect(FAKE_HOST, echo_port);
+        for (auto &c : cs) {
+            c.stop();
+        }
+        WiFiSSLClient again;
+        int reuse = again.connect(FAKE_HOST, echo_port);
+        again.stop();
+        printf("SSLSOCKETS %d %d %d\n", ok, ninth, reuse);
+    }
+}
+
 static void udp_tests(uint16_t echo_port, uint16_t local_port)
 {
     static uint8_t out[1500], in[1500];
@@ -394,6 +488,7 @@ extern "C" int host_main(int argc, char **argv)
         again.stop();
         printf("SOCKETS %d %d %d\n", ok, ninth, reuse);
     }
+    ssl_tests(echo_port, close_port);
     udp_tests(udp_echo_port, udp_local_port);
     server_tests(server_ports);
     {
