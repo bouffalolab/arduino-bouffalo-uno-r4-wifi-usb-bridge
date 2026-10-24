@@ -2,6 +2,7 @@
  * 主机测试用的 wifi_port（接口见平台 libraries/WiFi/src/wifi_port.h）：一个虚拟 AP，
  * 网络名与密码取自环境变量 AT_HOST_SSID、AT_HOST_PASS；连接 300 ms 后出结果，地址都在本机回环上。
  * 失败时的状态码与实板一致：密码错误 2，找不到 SSID 12。
+ * 扫描：第一次给出 scan_table 中按 RSSI 排好的前 max 个，第二次 0 个，之后都失败；run.py 按同一张表核对。
  */
 #include <arpa/inet.h>
 #include <stdlib.h>
@@ -125,4 +126,35 @@ int wifi_port_bssid(uint8_t bssid[6])
     }
     memcpy(bssid, b, 6);
     return 0;
+}
+
+static const struct wifi_port_ap scan_table[] = {
+    { "testnet", FAKE_BSSID, FAKE_RSSI, 6, WIFI_PORT_ENC_WPA2 },
+    { "open net", { 0x02, 0, 0, 0, 1, 2 }, -50, 1, WIFI_PORT_ENC_NONE },
+    { "abcdefghijklmnopqrstuvwxyz012345", { 0x02, 0, 0, 0, 1, 3 }, -55, 11, WIFI_PORT_ENC_WPA3 },
+    { "wep", { 0x02, 0, 0, 0, 1, 4 }, -60, 3, WIFI_PORT_ENC_WEP },
+    { "wpa", { 0x02, 0, 0, 0, 1, 5 }, -61, 4, WIFI_PORT_ENC_WPA },
+    { "eap", { 0x02, 0, 0, 0, 1, 6 }, -62, 5, WIFI_PORT_ENC_WPA2_ENTERPRISE },
+    { "odd", { 0x02, 0, 0, 0, 1, 7 }, -63, 13, WIFI_PORT_ENC_UNKNOWN },
+    { "n8", { 0x02, 0, 0, 0, 1, 8 }, -70, 2, WIFI_PORT_ENC_WPA2 },
+    { "n9", { 0x02, 0, 0, 0, 1, 9 }, -75, 7, WIFI_PORT_ENC_WPA2 },
+    { "n10", { 0x02, 0, 0, 0, 1, 10 }, -80, 9, WIFI_PORT_ENC_WPA2 },
+    { "n11", { 0x02, 0, 0, 0, 1, 11 }, -90, 10, WIFI_PORT_ENC_WPA2 },
+};
+
+int wifi_port_scan(struct wifi_port_ap *aps, int max, uint32_t timeout_ms)
+{
+    static int calls;
+    (void)timeout_ms;
+    switch (calls++) {
+        case 0: {
+            int n = 0;
+            for (; n < max && n < (int)(sizeof(scan_table) / sizeof(scan_table[0])); n++) {
+                aps[n] = scan_table[n];
+            }
+            return n;
+        }
+        case 1: return 0;
+        default: return -1;
+    }
 }

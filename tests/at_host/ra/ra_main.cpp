@@ -45,6 +45,20 @@ static void echo(const char *item, WiFiClient &c, int connected, size_t n)
     printf("%s %d %zu %zu %d\n", item, connected, wrote, got, got == n && memcmp(in, out, n) == 0);
 }
 
+/* 输出 "<项> <个数> <毫秒>"，再每个网络一行 "<项>AP <序号>|<ssid>|<bssid>|<rssi>|<信道>|<加密>" */
+static void scan(const char *item)
+{
+    unsigned long t = millis();
+    int found = WiFi.scanNetworks();
+    printf("%s %d %lu\n", item, found, millis() - t);
+    for (int i = 0; i < found; i++) {
+        uint8_t b[6];
+        WiFi.BSSID(i, b);
+        printf("%sAP %d|%s|%02X:%02X:%02X:%02X:%02X:%02X|%d|%u|%u\n", item, i, WiFi.SSID(i), b[0], b[1], b[2], b[3],
+               b[4], b[5], (int)WiFi.RSSI(i), WiFi.channel(i), WiFi.encryptionType(i));
+    }
+}
+
 extern "C" int host_main(int argc, char **argv)
 {
     if (argc != 6) {
@@ -71,6 +85,10 @@ extern "C" int host_main(int argc, char **argv)
         printf("EARLYDNS %d\n", WiFi.hostByName(FAKE_HOST, ip));
         printf("EARLYPING %d\n", WiFi.ping(loopback));
     }
+    /* 未连接时扫描；BL 侧替身依次给出一张表、空表、失败 */
+    scan("SCAN");
+    scan("SCANEMPTY");
+    scan("SCANFAIL");
 
     WiFi.setTimeout(2000);
     /* 先调用再输出：printf 参数的求值顺序不确定 */

@@ -30,6 +30,21 @@ WIFIS3_SOURCES = ("Modem.cpp", "WiFi.cpp", "WiFiClient.cpp", "StringHelpers.cpp"
 
 results = []
 
+# 与 bl/fake_wifi_port.c 的 scan_table 相同：(ssid, bssid, rssi, 信道, wl_enc_type)。第 11 个超出 10 个的上限
+SCAN_TABLE = [
+    ("testnet", "02:00:00:00:00:AA", -42, 6, 2),
+    ("open net", "02:00:00:00:01:02", -50, 1, 5),
+    ("abcdefghijklmnopqrstuvwxyz012345", "02:00:00:00:01:03", -55, 11, 4),
+    ("wep", "02:00:00:00:01:04", -60, 3, 0),
+    ("wpa", "02:00:00:00:01:05", -61, 4, 1),
+    ("eap", "02:00:00:00:01:06", -62, 5, 3),
+    ("odd", "02:00:00:00:01:07", -63, 13, 255),
+    ("n8", "02:00:00:00:01:08", -70, 2, 2),
+    ("n9", "02:00:00:00:01:09", -75, 7, 2),
+    ("n10", "02:00:00:00:01:0A", -80, 9, 2),
+    ("n11", "02:00:00:00:01:0B", -90, 10, 2),
+]
+
 
 def check(name, ok):
     results.append((name, ok))
@@ -191,6 +206,14 @@ def main():
     check("联网前连接失败（%s）" % v("EARLYCONNECT"), n("EARLYCONNECT") == [0])
     check("联网前解析失败（%s）" % v("EARLYDNS"), n("EARLYDNS") == [0])
     check("联网前 ping 返回负值（%s）" % v("EARLYPING"), n("EARLYPING") is not None and n("EARLYPING")[0] < 0)
+    rows = [ln.split(" ", 1)[1].split("|") for ln in lines if ln.startswith("SCANAP ")]
+    got = [(r[1], r[2], int(r[3]), int(r[4]), int(r[5])) for r in rows]
+    check("扫描：未连接时可用，按 RSSI 保留前 10 个，SSID 含空格与 32 字节、各加密方式往返一致（%s，%d 行）"
+          % (v("SCAN"), len(got)), n("SCAN") is not None and n("SCAN")[0] == 10 and got == SCAN_TABLE[:10])
+    e = n("SCANEMPTY")
+    check("扫描到 0 个网络时 1 s 内返回 0（%s）" % e, e is not None and e[0] == 0 and e[1] < 1000)
+    f = n("SCANFAIL")
+    check("扫描失败时 1 s 内返回 0（%s）" % f, f is not None and f[0] == 0 and f[1] < 1000)
     check("错误密码：begin 失败，status 为 WL_CONNECT_FAILED（%s）" % v("BADPASS"), n("BADPASS") == [4, 4])
     check("不存在的网络：begin 失败，status 为 WL_NO_SSID_AVAIL（%s）" % v("NOSSID"), n("NOSSID") == [4, 1])
     check("含逗号与空格的密码连接成功（%s）" % v("BEGIN"), n("BEGIN") is not None and n("BEGIN")[0] == 3)

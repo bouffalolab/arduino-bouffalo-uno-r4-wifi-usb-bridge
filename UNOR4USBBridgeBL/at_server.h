@@ -4,7 +4,7 @@
 
 /*
  * WiFiS3 AT 线协议的服务端：RA4M1 的 WiFiS3 库经 Serial2 发命令，这里调用平台 WiFi 库执行。
- * 首轮只实现联网、TCP 客户端用到的命令与 RESTARTBOOTLOADER，其余命令回 "+<命令>: ERROR"。协议、命令子集和对上游的
+ * 已实现联网、扫描、TCP 客户端用到的命令与 RESTARTBOOTLOADER，其余命令回 "+<命令>:ERROR"。协议、命令子集和对上游的
  * 偏离见工作区 docs/reference/wifis3-at-protocol.md。Wi-Fi 与 socket 调用都在调用 at_serve() 的任务中进行。
  */
 

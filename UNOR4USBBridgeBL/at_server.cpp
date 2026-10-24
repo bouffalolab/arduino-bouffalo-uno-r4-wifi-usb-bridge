@@ -47,11 +47,14 @@ static void reply_mac(Stream &io, const char *name, const uint8_t *mac)
     reply(io, name, s);
 }
 
-/* 失败一律回 "+<命令>: ERROR"：WiFiS3 把 RESULT_ERROR 误定义为 "OK"，收到裸 "ERROR" 要等满超时 */
+/*
+ * 失败一律回 "+<命令>:ERROR"：WiFiS3 把 RESULT_ERROR 误定义为 "OK"，收到裸 "ERROR" 要等满超时。
+ * 冒号后不带空格：WIFISCAN、CLIENTRECEIVE 等命令之前主机调用 avoid_trim_results，不去空格，" ERROR" 认不出
+ */
 static void reply_error(Stream &io, const char *name)
 {
     io.print(name);
-    io.print(": ERROR\r\n");
+    io.print(":ERROR\r\n");
 }
 
 /* 按逗号把 args 原地切成最多 max 段，最后一段保留其余逗号；返回段数 */
@@ -218,6 +221,50 @@ static void cmd_macsta(Stream &io, const char *name, char op, char *args)
         return;
     }
     reply_mac(io, name, WiFi.macAddress(mac));
+}
+
+/* 加密方式用上游的名称，WiFiS3 按名称换回 wl_enc_type */
+static const char *enc_name(uint8_t enc)
+{
+    switch (enc) {
+        case ENC_TYPE_NONE: return "open";
+        case ENC_TYPE_WEP: return "WEP";
+        case ENC_TYPE_WPA: return "WPA";
+        case ENC_TYPE_WPA2: return "WPA2";
+        case ENC_TYPE_WPA2_ENTERPRISE: return "WPA2-EAP";
+        case ENC_TYPE_WPA3: return "WPA3";
+        default: return "unknown";
+    }
+}
+
+/*
+ * AT+WIFISCAN：应答 "+WIFISCAN: <n>|" 加 n 字节的列表再加 "OK"，每个网络一行
+ * "<ssid> | <bssid> | <rssi> | <信道> | <加密>\r\n"。没有网络时 n 为 0（上游只回 "OK"）
+ */
+static void cmd_wifiscan(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    int n = op == '\0' ? WiFi.scanNetworks() : -1;
+    if (n < 0) {
+        reply_error(io, name);
+        return;
+    }
+    /* 10 行，每行最多 32 字节 SSID 加约 45 字节，放得进 data */
+    char *list = (char *)data;
+    size_t len = 0;
+    for (int i = 0; i < n; i++) {
+        uint8_t b[WL_MAC_ADDR_LENGTH];
+        WiFi.BSSID(i, b);
+        len += snprintf(list + len, sizeof(data) - len, "%s | %02X:%02X:%02X:%02X:%02X:%02X | %ld | %u | %s\r\n",
+                        WiFi.SSID(i), b[0], b[1], b[2], b[3], b[4], b[5], (long)WiFi.RSSI(i), WiFi.channel(i),
+                        enc_name(WiFi.encryptionType(i)));
+    }
+    io.print(name);
+    io.print(": ");
+    io.print(len);
+    io.print('|');
+    io.write(data, len);
+    io.print("OK\r\n");
 }
 
 static void cmd_disconnect(Stream &io, const char *name, char op, char *args)
@@ -477,6 +524,7 @@ static const struct {
     { "+GETRSSI", cmd_getrssi },
     { "+GETBSSID", cmd_getbssid },
     { "+MACSTA", cmd_macsta },
+    { "+WIFISCAN", cmd_wifiscan },
     { "+DISCONNECT", cmd_disconnect },
     { "+HOSTBYNAME", cmd_hostbyname },
     { "+PING", cmd_ping },

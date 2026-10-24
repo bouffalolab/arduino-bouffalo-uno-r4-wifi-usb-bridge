@@ -41,13 +41,14 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 | --- | --- | --- |
 | USB 串口（`Serial`）与 RA4M1 用户串口（`Serial1`，uart0 GPIO34/35 经 U4 接 SCI9）双向透传；其他波特率设为 `Serial1` 的波特率（8N1），每次改动后清空未转发的接收数据 | experimental | 首块板（1V0），Linux：以 FT232 代替 RA4M1 接在 GPIO34/35，115200、9600、230400、921600 下双向各 1–8 KB 逐字节一致；921600 下双向同时各 64 KB 连续 3 轮一致；重新打开端口后跟随波特率。接 RA4M1（R47/R48 补焊后）：115200 下回显 50 字节、2 KB 一致 |
 | 1200：MD 高、RESET 双击，RA4M1 进 bootloader；2400：MD 低、RESET 一次，RA4M1 进 ROM 下载模式，MD 保持低到下一次 1200（同官方 bridge） | experimental | 首块板（1V0），Linux：arduino-cli（renesas 1.6.0，unor4wifi）经 bridge 给 RA4M1 上传并运行，bossac 以 921600 连上 bootloader；2400 后 RA4M1 ROM 应答同步（0x00→0x00、0x55→0xC3），再经 1200 上传恢复；1200 时 BL616CL 不进下载模式 |
-| AT 命令（`Serial2`，uart1 GPIO6/7 经 U4 接 RA4M1 SCI1，115200 8N1，独立任务处理）：WiFiS3 的联网与 TCP 客户端，即 SOFTRESETWIFI、FWVERSION、WIFIMODE（只支持 1）、BEGINSTA、GETSTATUS、IPSTA、GETSSID、GETRSSI、GETBSSID、MACSTA、DISCONNECT、HOSTBYNAME、PING、BEGINCLIENT、CLIENTCONNECTNAME、CLIENTCONNECT、CLIENTSEND、AVAILABLE、CLIENTRECEIVE、CLIENTCONNECTED、CLIENTCLOSE、FLUSH、REMOTEIP、REMOTEPORT；失败回 `+<命令>: ERROR` | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3（renesas 1.6.0）：连 WPA3 网络 5.4 s 取得地址，DNS、ping 网关、按地址与域名连 80 端口 HTTP 收发、3000 字节 POST 正文写出、断开均正常；与局域网电脑上的 TCP 回显服务收发 1 B–4 KB 二进制负载（含 0x00、CRLF），两端逐字节一致；同一固件下透传与经 bridge 上传回归通过 |
+| AT 命令（`Serial2`，uart1 GPIO6/7 经 U4 接 RA4M1 SCI1，115200 8N1，独立任务处理）：WiFiS3 的联网与 TCP 客户端，即 SOFTRESETWIFI、FWVERSION、WIFIMODE（只支持 1）、BEGINSTA、GETSTATUS、IPSTA、GETSSID、GETRSSI、GETBSSID、MACSTA、DISCONNECT、HOSTBYNAME、PING、BEGINCLIENT、CLIENTCONNECTNAME、CLIENTCONNECT、CLIENTSEND、AVAILABLE、CLIENTRECEIVE、CLIENTCONNECTED、CLIENTCLOSE、FLUSH、REMOTEIP、REMOTEPORT；失败回 `+<命令>:ERROR`（冒号后不带空格，否则 WiFiS3 在 CLIENTRECEIVE、WIFISCAN 等命令上认不出、要等满 10 s） | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3（renesas 1.6.0）：连 WPA3 网络 5.4 s 取得地址，DNS、ping 网关、按地址与域名连 80 端口 HTTP 收发、3000 字节 POST 正文写出、断开均正常；与局域网电脑上的 TCP 回显服务收发 1 B–4 KB 二进制负载（含 0x00、CRLF），两端逐字节一致；同一固件下透传与经 bridge 上传回归通过 |
 | `AT+RESTARTBOOTLOADER`：回 `OK` 后复位进 BL616CL 的 ROM 下载模式，供更新本固件（上游直接复位、不应答） | experimental | 首块板（1V0），Linux：RA4M1 用未修改的 WiFiS3 发命令，0.6–0.9 s 后出现 ROM 下载口，经 USB 上传 bridge 后重新枚举，RA4M1 收到 `OK` 且未被复位，更新后 RA4M1 串口数据经 bridge 正常到达电脑；连续 6 轮通过（另一次运行第 4 轮上传中途 ROM 停止应答，见上文）。主机对接测试覆盖应答与复位调用 |
-| AP、扫描、静态地址、WiFiServer、UDP、TLS（WiFiSSLClient）、时间、文件系统、OTA、BLE、CMSIS-DAP | unimplemented | 对应 AT 命令回 `+<命令>: ERROR` |
+| `AT+WIFISCAN`（WiFiS3 `scanNetworks()`）：调用平台 `WiFi.scanNetworks()`，按上游格式列出最强的 10 个网络；没有网络时回 `+WIFISCAN: 0\|`（上游只回 `OK`） | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3（renesas 1.6.0）：未连接与已连接时扫描各 1.9–2.0 s 返回，字段有效、RSSI 有序，列出测试 AP 与当前 BSSID，扫描后连接保持、ping 网关成功；未修改的 ScanNetworks 例程连续 3 轮列出 8 个网络（10 个中 2 个隐藏网络被 WiFiS3 跳过）。主机对接测试覆盖 SSID 含空格与 32 字节、各加密方式、0 个网络与扫描失败 |
+| AP、静态地址、WiFiServer、UDP、TLS（WiFiSSLClient）、时间、文件系统、OTA、BLE、CMSIS-DAP | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
 
 ## 测试
 
-`tests/at_host/run.py` 在电脑上做 AT 对接测试：RA4M1 侧是未修改的 WiFiS3（直接编译已安装的 `arduino:renesas_uno` 包里的源码），BL616CL 侧是本仓库的 AT 服务端加 arduino-bl 的 WiFi 库，其中 Wi-Fi 换成虚拟 AP、socket 换成本机 socket；两个程序经 socketpair 相连，逐项核对联网、地址查询、DNS、ping、TCP 收发、socket 上限、错误应答与 RESTARTBOOTLOADER，共 25 项。需要 `g++`、`python3`，arduino-bl 默认取本仓库旁边的目录（`--platform` 可改）：
+`tests/at_host/run.py` 在电脑上做 AT 对接测试：RA4M1 侧是未修改的 WiFiS3（直接编译已安装的 `arduino:renesas_uno` 包里的源码），BL616CL 侧是本仓库的 AT 服务端加 arduino-bl 的 WiFi 库，其中 Wi-Fi 换成虚拟 AP、socket 换成本机 socket；两个程序经 socketpair 相连，逐项核对扫描、联网、地址查询、DNS、ping、TCP 收发、socket 上限、错误应答与 RESTARTBOOTLOADER，共 28 项。需要 `g++`、`python3`，arduino-bl 默认取本仓库旁边的目录（`--platform` 可改）：
 
 ```sh
 python3 tests/at_host/run.py --renesas <arduino 数据目录>/packages/arduino/hardware/renesas_uno/1.6.0
