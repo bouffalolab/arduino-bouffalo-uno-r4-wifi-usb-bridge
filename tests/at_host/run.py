@@ -7,7 +7,7 @@
 不复制进本仓库。--platform 默认是本仓库旁边的 arduino-bl：取 ArduinoCore-API（cores/bouffalo/api）与 libraries/WiFi。
 平台 WiFi 库的 wifi_port、net_port 换成 bl/ 下的主机实现：虚拟 AP、本机 POSIX socket。
 
-两个程序经 socketpair 相连，本脚本另在 127.0.0.1 起回显服务与关闭服务（发 "bye\\n" 后关闭）。ra_host 逐项输出结果，
+两个程序经 socketpair 相连，本脚本另在 127.0.0.1 起回显服务与关闭服务（发 "bye\\n" 后关闭），以及 UDP 回显服务。ra_host 逐项输出结果，
 本脚本判定；BL 侧进程必须运行到最后一条 AT+RESTARTBOOTLOADER，由 resetToBootloader 的替身打印标记后退出。另以 bl_host --early-client 单独检查平台 WiFiClient 在 Wi-Fi 初始化前的连接。
 退出码 0 表示全部通过。
 """
@@ -26,7 +26,7 @@ BRIDGE = os.path.normpath(os.path.join(HERE, "../.."))
 SSID = "testnet"
 PASS = "pa,ss wo,rd"  # 含逗号与空格：BEGINSTA 以第一个逗号分开网络名与密码
 API_SOURCES = ("String.cpp", "Print.cpp", "Stream.cpp", "IPAddress.cpp", "Common.cpp")
-WIFIS3_SOURCES = ("Modem.cpp", "WiFi.cpp", "WiFiClient.cpp", "StringHelpers.cpp")
+WIFIS3_SOURCES = ("Modem.cpp", "WiFi.cpp", "WiFiClient.cpp", "WiFiUdp.cpp", "StringHelpers.cpp")
 
 results = []
 
@@ -80,7 +80,7 @@ def build(args, out):
 
     bl_src = common + [os.path.join(HERE, "bl", f) for f in ("bl_main.cpp", "fake_wifi_port.c", "fake_net_port.c")]
     bl_src += [os.path.join(BRIDGE, "UNOR4USBBridgeBL/at_server.cpp")]
-    bl_src += [os.path.join(wifi, f) for f in ("WiFi.cpp", "WiFiClient.cpp")]
+    bl_src += [os.path.join(wifi, f) for f in ("WiFi.cpp", "WiFiClient.cpp", "WiFiUdp.cpp")]
     bl_inc = [host, os.path.join(HERE, "bl"), wifi, os.path.join(BRIDGE, "UNOR4USBBridgeBL"), api]
     bl_out = os.path.join(out, "bl")
     os.makedirs(bl_out, exist_ok=True)
@@ -97,12 +97,27 @@ def build(args, out):
 
 
 class Servers:
-    """回显服务记录每条连接收到的字节；关闭服务发 "bye\\n" 后关闭"""
+    """回显服务记录每条连接收到的字节；关闭服务发 "bye\\n" 后关闭。
+    UDP 回显服务把数据报原样发回来源并记录长度；收到 b"push" 时改从另一个 socket 发 b"pushed"（端口为 push_port）"""
 
     def __init__(self):
         self.received = []
         self.echo = self._listen(self._echo)
         self.close = self._listen(self._close)
+        self.udp_lens = []
+        self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp.bind(("127.0.0.1", 0))
+        self.udp_port = self.udp.getsockname()[1]
+        self.push = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.push.bind(("127.0.0.1", 0))
+        self.push_port = self.push.getsockname()[1]
+        threading.Thread(target=self._udp_echo, daemon=True).start()
+
+    def _udp_echo(self):
+        while True:
+            data, addr = self.udp.recvfrom(65536)
+            self.udp_lens.append(len(data))
+            (self.push if data == b"push" else self.udp).sendto(b"pushed" if data == b"push" else data, addr)
 
     def _listen(self, handler):
         s = socket.socket()
@@ -170,12 +185,18 @@ def main():
     check("平台 WiFiClient 在 Wi-Fi 初始化前连接直接失败、不调用 net_port（rc=%d，%s）"
           % (early.returncode, early.stdout.strip()), early.returncode == 0 and early.stdout.strip() == "EARLYCLIENT 0 0")
 
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # 取一个空闲的本机 UDP 端口给 BL 侧绑定
+    probe.bind(("127.0.0.1", 0))
+    udp_local = probe.getsockname()[1]
+    probe.close()
+
     a, b = socket.socketpair()
     env = dict(os.environ, AT_HOST_SSID=SSID, AT_HOST_PASS=PASS)
     bl_err = open(os.path.join(out, "bl_host.stderr"), "w")
     blp = subprocess.Popen([bl, str(b.fileno())], pass_fds=(b.fileno(),), env=env, stderr=bl_err)
     start = time.monotonic()
-    rap = subprocess.run([ra, str(a.fileno()), SSID, PASS, str(servers.echo), str(servers.close)],
+    rap = subprocess.run([ra, str(a.fileno()), SSID, PASS, str(servers.echo), str(servers.close), str(servers.udp_port),
+                          str(udp_local)],
                          pass_fds=(a.fileno(),), capture_output=True, text=True, timeout=180)
     took = time.monotonic() - start
     try:
@@ -235,6 +256,24 @@ def main():
     check("setConnectionTimeout 后的连接命令可用（%s）" % v("ECHOTIMEOUT"), n("ECHOTIMEOUT") == [1, 1, 1, 1])
     check("对端关闭后读完数据、connected() 为 0（%s）" % v("PEERCLOSE"), n("PEERCLOSE") == [1, 4, 0])
     check("8 个 socket 成功、第 9 个失败、释放后可再用（%s）" % v("SOCKETS"), n("SOCKETS") == [8, 0, 1])
+    check("联网前 WiFiUDP.begin 失败（%s）" % v("EARLYUDP"), n("EARLYUDP") == [0])
+    check("UDP：begin、beginPacket、分两次 write 1400 字节（含 0x00、CRLF、'|'）、endPacket，回显 1400 字节，"
+          "peek 为首字节、available 为全长、每次 500 字节读回一致（%s）" % v("UDPECHO"),
+          n("UDPECHO") == [1, 1, 1400, 1, 1400, 0, 1400, 1400, 1])
+    r = v("UDPREMOTE")
+    check("UDP remoteIP、remotePort（%s）" % r, r is not None and r[0] == "127.0.0.1" and r[1] == r[2])
+    u = n("UDPNONE")
+    check("没有数据报时 parsePacket 1 s 内返回 0（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
+    check("UDP 按域名 beginPacket，flush 后 available 为 0（%s）" % v("UDPNAME"), n("UDPNAME") == [1, 1, 5, 0])
+    u = n("UDPPUSH")
+    check("收到另一来源端口的数据报，remotePort 为该端口（%s，期望 %d）" % (u, servers.push_port),
+          u == [6, 1, servers.push_port])
+    check("超过 1460 字节的 write 失败、帧保持同步，已缓冲的 1460 字节照常发出并回显一致（%s）" % v("UDPBIG"),
+          n("UDPBIG") == [1, 0, 1, 1460, 1])
+    check("UDP 回显服务收到的长度依次为 1400、5、4、1460（%s）" % servers.udp_lens, servers.udp_lens == [1400, 5, 4, 1460])
+    check("4 个 UDP 成功、第 5 个失败、释放后可再用（%s）" % v("UDPSOCKETS"), n("UDPSOCKETS") == [4, 0, 1])
+    u = n("UDPMULTI")
+    check("组播 beginMulticast 1 s 内返回 0（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
     u = n("UNKNOWN")
     check("未知命令 1 s 内失败（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
     check("disconnect 后 status 为 WL_DISCONNECTED（%s）" % v("DISC"), n("DISC") == [6])

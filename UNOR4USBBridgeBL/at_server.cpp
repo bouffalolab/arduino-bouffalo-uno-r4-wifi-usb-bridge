@@ -9,6 +9,7 @@
 #define FW_VERSION         "0.1.0" /* 本固件版本，AT+FWVERSION 返回 */
 #define LINE_MAX           256     /* WiFiS3 的请求最长 128 字节 */
 #define MAX_SOCKETS        8       /* 同上游：BEGINCLIENT 分配 0–7 */
+#define MAX_UDP            4       /* 同上游：UDPBEGIN 分配 0–3，与 TCP 的编号各自独立 */
 #define CONNECT_TIMEOUT_MS 8000    /* WiFiS3 每条命令等 10 s，连接要在此之前应答 */
 #define PAYLOAD_TIMEOUT_MS 1000    /* CLIENTSEND 载荷两段之间的最长间隔 */
 #define RECV_MAX           1023    /* WiFiS3 每次 CLIENTRECEIVE 最多要 1023 字节 */
@@ -18,12 +19,15 @@ typedef void (*handler_t)(Stream &io, const char *name, char op, char *args);
 static char line[LINE_MAX + 1];
 static size_t line_len;
 static bool line_overflow;
-static uint8_t data[RECV_MAX + 1];
+/* CLIENTSEND、UDPWRITE 的分块，CLIENTRECEIVE、UDPREAD、WIFISCAN 的应答共用；UDPREAD 一次最多一个数据报 */
+static uint8_t data[WIFI_UDP_BUFFER_SIZE];
 
 static int wifi_mode;    /* AT+WIFIMODE：0 未设置，1 STA */
 static bool sta_started; /* 发起过 BEGINSTA：Wi-Fi 协议栈已初始化，断开才有意义 */
 static WiFiClient clients[MAX_SOCKETS];
 static bool allocated[MAX_SOCKETS];
+static WiFiUDP udps[MAX_UDP];
+static bool udp_allocated[MAX_UDP];
 
 static void reply(Stream &io, const char *name, const char *payload)
 {
@@ -55,6 +59,17 @@ static void reply_error(Stream &io, const char *name)
 {
     io.print(name);
     io.print(":ERROR\r\n");
+}
+
+/* "+<命令>: <n>|" 加 data 的前 n 个原始字节再加 "OK"，中间没有换行；主机按长度读，载荷可含任意字节 */
+static void reply_data(Stream &io, const char *name, size_t n)
+{
+    io.print(name);
+    io.print(": ");
+    io.print(n);
+    io.print('|');
+    io.write(data, n);
+    io.print("OK\r\n");
 }
 
 /* 按逗号把 args 原地切成最多 max 段，最后一段保留其余逗号；返回段数 */
@@ -92,6 +107,46 @@ static void close_socket(int s)
     allocated[s] = false;
 }
 
+/* 已由 UDPBEGIN 分配的 UDP 编号，否则 -1 */
+static int udp_arg(const char *s)
+{
+    long v;
+    return parse_long(s, &v) && v >= 0 && v < MAX_UDP && udp_allocated[v] ? (int)v : -1;
+}
+
+static void close_udp(int u)
+{
+    udps[u].stop();
+    udp_allocated[u] = false;
+}
+
+/*
+ * 读命令行之后紧跟的 left 个原始字节，边收边写给 sink（为空时只读不写）。出错也读完，保持帧同步；
+ * 两段之间超过 PAYLOAD_TIMEOUT_MS 时放弃。全部收到且写出返回 true
+ */
+static bool read_payload(Stream &io, long left, Print *sink)
+{
+    bool ok = sink != nullptr;
+    unsigned long last = millis();
+    while (left > 0) {
+        long n = io.available();
+        if (n <= 0) {
+            if (millis() - last > PAYLOAD_TIMEOUT_MS) {
+                return false;
+            }
+            delay(1);
+            continue;
+        }
+        n = io.readBytes(data, min(n, min(left, (long)sizeof(data))));
+        last = millis();
+        left -= n;
+        if (ok && sink->write(data, n) != (size_t)n) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 /* 主机每次启动后第一个 Wi-Fi 调用前发送，只等 500 ms：先应答，再关 socket、断开 */
 static void cmd_softreset(Stream &io, const char *name, char op, char *args)
 {
@@ -103,6 +158,9 @@ static void cmd_softreset(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
     for (int s = 0; s < MAX_SOCKETS; s++) {
         close_socket(s);
+    }
+    for (int u = 0; u < MAX_UDP; u++) {
+        close_udp(u);
     }
     if (sta_started) {
         WiFi.disconnect();
@@ -259,12 +317,7 @@ static void cmd_wifiscan(Stream &io, const char *name, char op, char *args)
                         WiFi.SSID(i), b[0], b[1], b[2], b[3], b[4], b[5], (long)WiFi.RSSI(i), WiFi.channel(i),
                         enc_name(WiFi.encryptionType(i)));
     }
-    io.print(name);
-    io.print(": ");
-    io.print(len);
-    io.print('|');
-    io.write(data, len);
-    io.print("OK\r\n");
+    reply_data(io, name, len);
 }
 
 static void cmd_disconnect(Stream &io, const char *name, char op, char *args)
@@ -377,26 +430,7 @@ static void cmd_clientsend(Stream &io, const char *name, char op, char *args)
         return;
     }
     int s = socket_arg(argv[0]);
-    bool ok = s >= 0;
-    unsigned long last = millis();
-    while (left > 0) {
-        long n = io.available();
-        if (n <= 0) {
-            if (millis() - last > PAYLOAD_TIMEOUT_MS) {
-                ok = false;
-                break;
-            }
-            delay(1);
-            continue;
-        }
-        n = io.readBytes(data, min(n, min(left, (long)sizeof(data))));
-        last = millis();
-        left -= n;
-        if (ok && clients[s].write(data, n) != (size_t)n) {
-            ok = false;
-        }
-    }
-    if (ok) {
+    if (read_payload(io, left, s >= 0 ? &clients[s] : nullptr)) {
         io.print("OK\r\n");
     } else {
         reply_error(io, name);
@@ -413,7 +447,7 @@ static void cmd_available(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, clients[s].available());
 }
 
-/* AT+CLIENTRECEIVE=<sock>,<max>：应答 "+CLIENTRECEIVE: <n>|" 加 n 个原始字节再加 "OK"，中间没有换行 */
+/* AT+CLIENTRECEIVE=<sock>,<max>：应答见 reply_data */
 static void cmd_clientreceive(Stream &io, const char *name, char op, char *args)
 {
     char *argv[2];
@@ -435,12 +469,7 @@ static void cmd_clientreceive(Stream &io, const char *name, char op, char *args)
         }
         got += n;
     }
-    io.print(name);
-    io.print(": ");
-    io.print(got);
-    io.print('|');
-    io.write(data, got);
-    io.print("OK\r\n");
+    reply_data(io, name, got);
 }
 
 static void cmd_clientconnected(Stream &io, const char *name, char op, char *args)
@@ -496,6 +525,174 @@ static void cmd_remoteport(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, clients[s].remotePort());
 }
 
+/* AT+UDPBEGIN=<本地端口>[,<本地地址>]：应答 UDP 编号 */
+static void cmd_udpbegin(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[2];
+    long port;
+    IPAddress local;
+    int n = op == '=' ? split(args, argv, 2) : 0;
+    if (n == 0 || !parse_long(argv[0], &port) || port < 0 || port > 65535 || (n == 2 && !local.fromString(argv[1]))) {
+        reply_error(io, name);
+        return;
+    }
+    for (int u = 0; u < MAX_UDP; u++) {
+        if (!udp_allocated[u]) {
+            if (!(n == 2 ? udps[u].begin(local, (uint16_t)port) : udps[u].begin((uint16_t)port))) {
+                break;
+            }
+            udp_allocated[u] = true;
+            reply_int(io, name, u);
+            return;
+        }
+    }
+    reply_error(io, name);
+}
+
+/* AT+UDPBEGINPACKETIP=<udp>,<端口>,<地址>、AT+UDPBEGINPACKETADD=<udp>,<端口>,<主机名>（beginPacket(host)） */
+static void begin_packet(Stream &io, const char *name, char op, char *args, bool by_name)
+{
+    char *argv[3];
+    long port;
+    IPAddress ip;
+    int u = -1;
+    if (op == '=' && split(args, argv, 3) == 3 && parse_long(argv[1], &port) && port > 0 && port <= 65535 &&
+        (by_name || ip.fromString(argv[2]))) {
+        u = udp_arg(argv[0]);
+    }
+    if (u < 0 || !(by_name ? udps[u].beginPacket(argv[2], (uint16_t)port) : udps[u].beginPacket(ip, (uint16_t)port))) {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, "");
+}
+
+static void cmd_udpbeginpacketip(Stream &io, const char *name, char op, char *args)
+{
+    begin_packet(io, name, op, args, false);
+}
+
+static void cmd_udpbeginpacketadd(Stream &io, const char *name, char op, char *args)
+{
+    begin_packet(io, name, op, args, true);
+}
+
+/* AT+UDPWRITE=<udp>,<n> 后紧跟 n 个原始字节，追加到当前数据报；同 CLIENTSEND，成功只回裸 "OK" */
+static void cmd_udpwrite(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[2];
+    long left;
+    if (op != '=' || split(args, argv, 2) != 2 || !parse_long(argv[1], &left) || left < 0) {
+        reply_error(io, name);
+        return;
+    }
+    int u = udp_arg(argv[0]);
+    if (read_payload(io, left, u >= 0 ? &udps[u] : nullptr)) {
+        io.print("OK\r\n");
+    } else {
+        reply_error(io, name);
+    }
+}
+
+static void cmd_udpendpacket(Stream &io, const char *name, char op, char *args)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0 || !udps[u].endPacket()) {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, "");
+}
+
+static void cmd_udpparse(Stream &io, const char *name, char op, char *args)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0) {
+        reply_error(io, name);
+        return;
+    }
+    reply_int(io, name, udps[u].parsePacket());
+}
+
+static void cmd_udpavailable(Stream &io, const char *name, char op, char *args)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0) {
+        reply_error(io, name);
+        return;
+    }
+    reply_int(io, name, udps[u].available());
+}
+
+/* AT+UDPREAD=<udp>,<max>：读当前数据报，应答见 reply_data */
+static void cmd_udpread(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[2];
+    long max;
+    int u = -1;
+    if (op == '=' && split(args, argv, 2) == 2 && parse_long(argv[1], &max) && max >= 0) {
+        u = udp_arg(argv[0]);
+    }
+    if (u < 0) {
+        reply_error(io, name);
+        return;
+    }
+    reply_data(io, name, udps[u].read(data, min(max, (long)sizeof(data))));
+}
+
+/* 下一个字节的值，没有时 -1 */
+static void cmd_udppeek(Stream &io, const char *name, char op, char *args)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0) {
+        reply_error(io, name);
+        return;
+    }
+    reply_int(io, name, udps[u].peek());
+}
+
+static void cmd_udpflush(Stream &io, const char *name, char op, char *args)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0) {
+        reply_error(io, name);
+        return;
+    }
+    udps[u].flush();
+    reply(io, name, "");
+}
+
+static void cmd_udpremoteip(Stream &io, const char *name, char op, char *args)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0) {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, udps[u].remoteIP().toString().c_str());
+}
+
+static void cmd_udpremoteport(Stream &io, const char *name, char op, char *args)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0) {
+        reply_error(io, name);
+        return;
+    }
+    reply_int(io, name, udps[u].remotePort());
+}
+
+static void cmd_udpstop(Stream &io, const char *name, char op, char *args)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0) {
+        reply_error(io, name);
+        return;
+    }
+    close_udp(u);
+    reply(io, name, "");
+}
+
 /* AT+RESTARTBOOTLOADER：BL616CL 复位进 ROM 下载模式，供更新本固件。上游直接复位、不应答，主机要等满超时；
    这里先回 OK 并等它发完 */
 static void cmd_restartbootloader(Stream &io, const char *name, char op, char *args)
@@ -539,6 +736,20 @@ static const struct {
     { "+FLUSH", cmd_flush },
     { "+REMOTEIP", cmd_remoteip },
     { "+REMOTEPORT", cmd_remoteport },
+    /* 组播（UDPBEGINMULTI、BEGINPACKETMULTI）未实现，按未知命令回 ERROR */
+    { "+UDPBEGIN", cmd_udpbegin },
+    { "+UDPBEGINPACKETIP", cmd_udpbeginpacketip },
+    { "+UDPBEGINPACKETADD", cmd_udpbeginpacketadd },
+    { "+UDPWRITE", cmd_udpwrite },
+    { "+UDPENDPACKET", cmd_udpendpacket },
+    { "+UDPPARSE", cmd_udpparse },
+    { "+UDPAVAILABLE", cmd_udpavailable },
+    { "+UDPREAD", cmd_udpread },
+    { "+UDPPEEK", cmd_udppeek },
+    { "+UDPFLUSH", cmd_udpflush },
+    { "+UDPREMOTEIP", cmd_udpremoteip },
+    { "+UDPREMOTEPORT", cmd_udpremoteport },
+    { "+UDPSTOP", cmd_udpstop },
     { "+RESTARTBOOTLOADER", cmd_restartbootloader },
 };
 

@@ -140,6 +140,51 @@ void net_port_close(int sock)
     close(sock);
 }
 
+int net_port_udp_open(uint32_t addr, uint16_t port)
+{
+    require_wifi(__func__);
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = addr;
+    if (bind(sock, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        close(sock);
+        return -1;
+    }
+    return sock;
+}
+
+int net_port_udp_send(int sock, uint32_t addr, uint16_t port, const uint8_t *buf, size_t len)
+{
+    require_wifi(__func__);
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    to.sin_addr.s_addr = addr;
+    return sendto(sock, buf, len, 0, (struct sockaddr *)&to, sizeof(to)) == (ssize_t)len ? 0 : -1;
+}
+
+int net_port_udp_recv(int sock, uint8_t *buf, size_t len, uint32_t *addr, uint16_t *port)
+{
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+
+    require_wifi(__func__);
+    ssize_t n = recvfrom(sock, buf, len, MSG_DONTWAIT, (struct sockaddr *)&from, &fromlen);
+    if (n < 0) {
+        return errno == EAGAIN || errno == EWOULDBLOCK ? 0 : -1;
+    }
+    *addr = from.sin_addr.s_addr;
+    *port = ntohs(from.sin_port);
+    return (int)n;
+}
+
 int net_port_ping(uint32_t addr, uint8_t ttl, uint16_t seq, uint32_t timeout_ms)
 {
     (void)ttl;
