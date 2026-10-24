@@ -26,7 +26,7 @@ BRIDGE = os.path.normpath(os.path.join(HERE, "../.."))
 SSID = "testnet"
 PASS = "pa,ss wo,rd"  # 含逗号与空格：BEGINSTA 以第一个逗号分开网络名与密码
 API_SOURCES = ("String.cpp", "Print.cpp", "Stream.cpp", "IPAddress.cpp", "Common.cpp")
-WIFIS3_SOURCES = ("Modem.cpp", "WiFi.cpp", "WiFiClient.cpp", "WiFiUdp.cpp", "StringHelpers.cpp")
+WIFIS3_SOURCES = ("Modem.cpp", "WiFi.cpp", "WiFiClient.cpp", "WiFiServer.cpp", "WiFiUdp.cpp", "StringHelpers.cpp")
 
 results = []
 
@@ -80,7 +80,7 @@ def build(args, out):
 
     bl_src = common + [os.path.join(HERE, "bl", f) for f in ("bl_main.cpp", "fake_wifi_port.c", "fake_net_port.c")]
     bl_src += [os.path.join(BRIDGE, "UNOR4USBBridgeBL/at_server.cpp")]
-    bl_src += [os.path.join(wifi, f) for f in ("WiFi.cpp", "WiFiClient.cpp", "WiFiUdp.cpp")]
+    bl_src += [os.path.join(wifi, f) for f in ("WiFi.cpp", "WiFiClient.cpp", "WiFiServer.cpp", "WiFiUdp.cpp")]
     bl_inc = [host, os.path.join(HERE, "bl"), wifi, os.path.join(BRIDGE, "UNOR4USBBridgeBL"), api]
     bl_out = os.path.join(out, "bl")
     os.makedirs(bl_out, exist_ok=True)
@@ -151,6 +151,69 @@ class Servers:
         conn.close()
 
 
+def free_port(kind=socket.SOCK_STREAM):
+    s = socket.socket(socket.AF_INET, kind)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def server_peer(port, log):
+    """按 ra_main.cpp server_tests 的顺序当客户端，每步等到应答再走下一步；结果记进 log"""
+
+    def connect(timeout=20):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            try:
+                return socket.create_connection(("127.0.0.1", port), timeout=5)
+            except OSError:
+                time.sleep(0.05)
+        raise TimeoutError("connect %d" % port)
+
+    def line(s):
+        buf = b""
+        while not buf.endswith(b"\n"):
+            ch = s.recv(1)
+            if not ch:
+                break
+            buf += ch
+        return buf
+
+    try:
+        a = connect(150)  # ra 跑完前面各项才 begin
+        a.sendall(b"hello\n")
+        log["chat"] = [line(a)]
+        a.sendall(b"again\n")
+        log["chat"].append(line(a))
+        a.close()
+        b = connect()
+        log["welcome"] = line(b)
+        b.sendall(b"ok\n")
+        log["accept_eof"] = b.recv(16) == b""
+        b.close()
+        c1, c2 = connect(), connect()
+        c1.sendall(b"x\n")
+        c2.sendall(b"x\n")
+        log["bc"] = [line(c1), line(c2)]
+        c1.close()
+        c2.close()
+        log["churn"] = 0
+        for _ in range(10):
+            s = connect()
+            s.sendall(b"n\n")
+            log["churn"] += line(s) == b"k\n"
+            s.close()
+        time.sleep(1.0)
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+            log["after_end"] = "connected"
+        except OSError:
+            log["after_end"] = "refused"
+    except Exception as e:  # noqa: BLE001
+        log["error"] = repr(e)
+
+
 def fields(lines, item):
     for ln in lines:
         parts = ln.split(" ")
@@ -185,10 +248,11 @@ def main():
     check("平台 WiFiClient 在 Wi-Fi 初始化前连接直接失败、不调用 net_port（rc=%d，%s）"
           % (early.returncode, early.stdout.strip()), early.returncode == 0 and early.stdout.strip() == "EARLYCLIENT 0 0")
 
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # 取一个空闲的本机 UDP 端口给 BL 侧绑定
-    probe.bind(("127.0.0.1", 0))
-    udp_local = probe.getsockname()[1]
-    probe.close()
+    udp_local = free_port(socket.SOCK_DGRAM)  # 给 BL 侧绑定的本机 UDP 端口
+    server_ports = [free_port() for _ in range(6)]
+    peer = {}
+    peer_thread = threading.Thread(target=server_peer, args=(server_ports[0], peer), daemon=True)
+    peer_thread.start()
 
     a, b = socket.socketpair()
     env = dict(os.environ, AT_HOST_SSID=SSID, AT_HOST_PASS=PASS)
@@ -196,7 +260,7 @@ def main():
     blp = subprocess.Popen([bl, str(b.fileno())], pass_fds=(b.fileno(),), env=env, stderr=bl_err)
     start = time.monotonic()
     rap = subprocess.run([ra, str(a.fileno()), SSID, PASS, str(servers.echo), str(servers.close), str(servers.udp_port),
-                          str(udp_local)],
+                          str(udp_local), ",".join(map(str, server_ports))],
                          pass_fds=(a.fileno(),), capture_output=True, text=True, timeout=180)
     took = time.monotonic() - start
     try:
@@ -274,6 +338,21 @@ def main():
     check("4 个 UDP 成功、第 5 个失败、释放后可再用（%s）" % v("UDPSOCKETS"), n("UDPSOCKETS") == [4, 0, 1])
     u = n("UDPMULTI")
     check("组播 beginMulticast 1 s 内返回 0（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
+    peer_thread.join(timeout=5)
+    check("联网前 WiFiServer.begin 失败（%s）" % v("EARLYSERVER"), n("EARLYSERVER") == [0])
+    check("服务端 begin（%s）；客户端线程无异常（%s）" % (v("SRVBEGIN"), peer.get("error")),
+          n("SRVBEGIN") == [1] and "error" not in peer)
+    check("available() 两次返回同一连接，逐行应答（%s，%s）" % (v("SRVCHAT"), peer.get("chat")),
+          n("SRVCHAT") == [2, 1] and peer.get("chat") == [b"HELLO\n", b"AGAIN\n"])
+    check("accept() 取得新连接，收发后 stop() 关闭（%s，%s）" % (v("SRVACCEPT"), peer.get("welcome")),
+          n("SRVACCEPT") == [1, 1] and peer.get("welcome") == b"welcome\n" and peer.get("accept_eof") is True)
+    check("server.write 发给 available() 收下的两个连接（%s，%s）" % (v("SRVBCAST"), peer.get("bc")),
+          n("SRVBCAST") == [2, 3] and peer.get("bc") == [b"bc\n", b"bc\n"])
+    check("连续 10 个连接（多于 8 个位置）都得到应答，断开的位置被回收（%s，%s）" % (v("SRVCHURN"), peer.get("churn")),
+          n("SRVCHURN") == [10] and peer.get("churn") == 10)
+    check("end() 后不再接受连接（%s，%s）" % (v("SRVEND"), peer.get("after_end")),
+          n("SRVEND") == [0] and peer.get("after_end") == "refused")
+    check("4 个服务端成功、第 5 个失败、释放后可再用（%s）" % v("SRVLIMIT"), n("SRVLIMIT") == [4, 0, 1])
     u = n("UNKNOWN")
     check("未知命令 1 s 内失败（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
     check("disconnect 后 status 为 WL_DISCONNECTED（%s）" % v("DISC"), n("DISC") == [6])

@@ -1,12 +1,15 @@
 /*
  * RA4M1 侧：未修改的 WiFiS3 经串口向 BL616CL 侧发 AT，逐项输出 "<项> <值>..."，由 run.py 判定。
- * 用法：ra_host <串口 fd> <网络名> <密码> <回显端口> <关闭端口> <UDP 回显端口> <UDP 本地端口>
+ * 用法：ra_host <串口 fd> <网络名> <密码> <回显端口> <关闭端口> <UDP 回显端口> <UDP 本地端口> <服务端口,另 5 个空闲端口>
  * 回显端口原样发回收到的字节；关闭端口发 "bye\n" 后关闭连接。UDP 回显服务把数据报原样发回来源，
- * 收到 "push" 时改从另一个 socket 发 "pushed"。
+ * 收到 "push" 时改从另一个 socket 发 "pushed"。服务端各项由 run.py 的客户端线程按顺序配合（见 run.py 的 server_peer）。
  */
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <string>
 
 #include "WiFiS3.h"
 #include "fake_ports.h"
@@ -144,6 +147,116 @@ static void udp_tests(uint16_t echo_port, uint16_t local_port)
     }
 }
 
+/* 从 c 读一行（不含 '\n'）到 line，最多等 timeout_ms；读到返回 true */
+static bool read_line(WiFiClient &c, std::string &line, unsigned long timeout_ms)
+{
+    unsigned long start = millis();
+    line.clear();
+    while (millis() - start < timeout_ms) {
+        int b = c.available() > 0 ? c.read() : -1;
+        if (b < 0) {
+            delay(1);
+        } else if (b == '\n') {
+            return true;
+        } else {
+            line += (char)b;
+        }
+    }
+    return false;
+}
+
+/* 一个服务端轮询 available()，对每行回一行，直到处理 n 行或超时；返回处理的行数。
+   upper 为真时回大写的原文，否则回 "k" */
+static int serve_lines(WiFiServer &srv, int n, bool upper, unsigned long timeout_ms, int *same)
+{
+    WiFiClient first;
+    int done = 0;
+    unsigned long start = millis();
+    *same = 1;
+    while (done < n && millis() - start < timeout_ms) {
+        WiFiClient c = srv.available();
+        std::string line;
+        if (!c || !read_line(c, line, 1000)) {
+            delay(5);
+            continue;
+        }
+        if (done == 0) {
+            first = c;
+        } else if (!(c == first)) {
+            *same = 0;
+        }
+        for (auto &ch : line) {
+            ch = upper ? (char)toupper((unsigned char)ch) : ch;
+        }
+        c.print(upper ? line.c_str() : "k");
+        c.print("\n");
+        done++;
+    }
+    return done;
+}
+
+/* ports[0] 为主服务端口，ports[1..5] 用于服务端个数上限 */
+static void server_tests(const uint16_t *ports)
+{
+    WiFiServer srv(ports[0]);
+    srv.begin();
+    printf("SRVBEGIN %d\n", (int)(bool)srv);
+    int same;
+    int n = serve_lines(srv, 2, true, 10000, &same);
+    printf("SRVCHAT %d %d\n", n, same);
+    {
+        WiFiClient c;
+        unsigned long start = millis();
+        while (!(c = srv.accept()) && millis() - start < 5000) {
+            delay(5);
+        }
+        int got = (bool)c;
+        if (got) {
+            c.print("welcome\n");
+        }
+        std::string line;
+        int ok = got && read_line(c, line, 3000) && line == "ok";
+        c.stop();
+        printf("SRVACCEPT %d %d\n", got, ok);
+    }
+    {
+        WiFiClient seen[2];
+        int distinct = 0;
+        unsigned long start = millis();
+        while (distinct < 2 && millis() - start < 5000) {
+            WiFiClient c = srv.available();
+            std::string line;
+            if (c && read_line(c, line, 1000) && line == "x" && (distinct == 0 || !(c == seen[0]))) {
+                seen[distinct++] = c;
+            }
+        }
+        size_t w = srv.write((const uint8_t *)"bc\n", 3);
+        printf("SRVBCAST %d %zu\n", distinct, w);
+    }
+    n = serve_lines(srv, 10, false, 20000, &same);
+    printf("SRVCHURN %d\n", n);
+    srv.end();
+    printf("SRVEND %d\n", (int)(bool)srv);
+    {
+        /* 不用 ports[0]：run.py 此时在确认它已不再接受连接 */
+        WiFiServer more[5] = { ports[1], ports[2], ports[3], ports[4], ports[5] };
+        int ok = 0;
+        for (int i = 0; i < 4; i++) {
+            more[i].begin();
+            ok += (bool)more[i];
+        }
+        more[4].begin();
+        int fifth = (bool)more[4];
+        more[0].end();
+        more[4].begin();
+        int reuse = (bool)more[4];
+        for (auto &m : more) {
+            m.end();
+        }
+        printf("SRVLIMIT %d %d %d\n", ok, fifth, reuse);
+    }
+}
+
 /* 输出 "<项> <个数> <毫秒>"，再每个网络一行 "<项>AP <序号>|<ssid>|<bssid>|<rssi>|<信道>|<加密>" */
 static void scan(const char *item)
 {
@@ -160,7 +273,7 @@ static void scan(const char *item)
 
 extern "C" int host_main(int argc, char **argv)
 {
-    if (argc != 8) {
+    if (argc != 9) {
         return 2;
     }
     Serial2.setFd(atoi(argv[1]));
@@ -170,6 +283,14 @@ extern "C" int host_main(int argc, char **argv)
     uint16_t close_port = (uint16_t)atoi(argv[5]);
     uint16_t udp_echo_port = (uint16_t)atoi(argv[6]);
     uint16_t udp_local_port = (uint16_t)atoi(argv[7]);
+    uint16_t server_ports[6];
+    {
+        char *p = argv[8];
+        for (auto &sp : server_ports) {
+            sp = (uint16_t)strtoul(p, &p, 10);
+            p += *p == ',';
+        }
+    }
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     unsigned long t = millis();
@@ -187,6 +308,9 @@ extern "C" int host_main(int argc, char **argv)
         printf("EARLYPING %d\n", WiFi.ping(loopback));
         WiFiUDP u;
         printf("EARLYUDP %d\n", u.begin(udp_local_port));
+        WiFiServer s(server_ports[0]);
+        s.begin();
+        printf("EARLYSERVER %d\n", (int)(bool)s);
     }
     /* 未连接时扫描；BL 侧替身依次给出一张表、空表、失败 */
     scan("SCAN");
@@ -271,6 +395,7 @@ extern "C" int host_main(int argc, char **argv)
         printf("SOCKETS %d %d %d\n", ok, ninth, reuse);
     }
     udp_tests(udp_echo_port, udp_local_port);
+    server_tests(server_ports);
     {
         std::string res;
         t = millis();

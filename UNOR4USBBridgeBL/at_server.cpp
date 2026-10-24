@@ -10,6 +10,8 @@
 #define LINE_MAX           256     /* WiFiS3 的请求最长 128 字节 */
 #define MAX_SOCKETS        8       /* 同上游：BEGINCLIENT 分配 0–7 */
 #define MAX_UDP            4       /* 同上游：UDPBEGIN 分配 0–3，与 TCP 的编号各自独立 */
+#define MAX_SERVERS        4       /* 同上游：BEGINSERVER 分配 0–3 */
+#define SERVER_SOCK_BASE   1000    /* 同上游：服务端接入的连接编号 1000–1007，走 CLIENT* 命令 */
 #define CONNECT_TIMEOUT_MS 8000    /* WiFiS3 每条命令等 10 s，连接要在此之前应答 */
 #define PAYLOAD_TIMEOUT_MS 1000    /* CLIENTSEND 载荷两段之间的最长间隔 */
 #define RECV_MAX           1023    /* WiFiS3 每次 CLIENTRECEIVE 最多要 1023 字节 */
@@ -28,6 +30,15 @@ static WiFiClient clients[MAX_SOCKETS];
 static bool allocated[MAX_SOCKETS];
 static WiFiUDP udps[MAX_UDP];
 static bool udp_allocated[MAX_UDP];
+static WiFiServer servers[MAX_SERVERS];
+static bool server_allocated[MAX_SERVERS];
+/* 服务端接入的连接，编号 SERVER_SOCK_BASE + i；server 为 -1 表示空位。accepted 为假的由 SERVERAVAILABLE 收下，
+   SERVERWRITE 发给它们（同上游）；为真的由 SERVERACCEPT 交给主机 */
+static struct {
+    WiFiClient client;
+    int server = -1;
+    bool accepted;
+} conns[MAX_SOCKETS];
 
 static void reply(Stream &io, const char *name, const char *payload)
 {
@@ -94,17 +105,33 @@ static bool parse_long(const char *s, long *value)
     return end != s && *end == '\0';
 }
 
-/* 已由 BEGINCLIENT 分配的 socket 号，否则 -1 */
+/* 已分配的连接号：BEGINCLIENT 的 0–7，或服务端接入的 1000–1007；否则 -1 */
 static int socket_arg(const char *s)
 {
     long v;
-    return parse_long(s, &v) && v >= 0 && v < MAX_SOCKETS && allocated[v] ? (int)v : -1;
+    if (!parse_long(s, &v)) {
+        return -1;
+    }
+    if (v >= 0 && v < MAX_SOCKETS) {
+        return allocated[v] ? (int)v : -1;
+    }
+    long i = v - SERVER_SOCK_BASE;
+    return i >= 0 && i < MAX_SOCKETS && conns[i].server >= 0 ? (int)v : -1;
+}
+
+static WiFiClient &client_of(int s)
+{
+    return s < SERVER_SOCK_BASE ? clients[s] : conns[s - SERVER_SOCK_BASE].client;
 }
 
 static void close_socket(int s)
 {
-    clients[s].stop();
-    allocated[s] = false;
+    client_of(s).stop();
+    if (s < SERVER_SOCK_BASE) {
+        allocated[s] = false;
+    } else {
+        conns[s - SERVER_SOCK_BASE].server = -1;
+    }
 }
 
 /* 已由 UDPBEGIN 分配的 UDP 编号，否则 -1 */
@@ -158,6 +185,15 @@ static void cmd_softreset(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
     for (int s = 0; s < MAX_SOCKETS; s++) {
         close_socket(s);
+    }
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        if (conns[i].server >= 0) {
+            close_socket(SERVER_SOCK_BASE + i);
+        }
+    }
+    for (int v = 0; v < MAX_SERVERS; v++) {
+        servers[v].end();
+        server_allocated[v] = false;
     }
     for (int u = 0; u < MAX_UDP; u++) {
         close_udp(u);
@@ -382,7 +418,8 @@ static void connect_socket(Stream &io, const char *name, char **argv, long timeo
 {
     long port;
     int s = socket_arg(argv[0]);
-    if (s < 0 || !parse_long(argv[2], &port) || port < 1 || port > 65535 || WiFi.status() != WL_CONNECTED) {
+    if (s < 0 || s >= MAX_SOCKETS || !parse_long(argv[2], &port) || port < 1 || port > 65535 ||
+        WiFi.status() != WL_CONNECTED) {
         reply_error(io, name);
         return;
     }
@@ -430,7 +467,7 @@ static void cmd_clientsend(Stream &io, const char *name, char op, char *args)
         return;
     }
     int s = socket_arg(argv[0]);
-    if (read_payload(io, left, s >= 0 ? &clients[s] : nullptr)) {
+    if (read_payload(io, left, s >= 0 ? &client_of(s) : nullptr)) {
         io.print("OK\r\n");
     } else {
         reply_error(io, name);
@@ -444,7 +481,7 @@ static void cmd_available(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    reply_int(io, name, clients[s].available());
+    reply_int(io, name, client_of(s).available());
 }
 
 /* AT+CLIENTRECEIVE=<sock>,<max>：应答见 reply_data */
@@ -463,7 +500,7 @@ static void cmd_clientreceive(Stream &io, const char *name, char op, char *args)
     size_t want = min(max, (long)RECV_MAX);
     size_t got = 0;
     while (got < want) {
-        int n = clients[s].read(data + got, want - got);
+        int n = client_of(s).read(data + got, want - got);
         if (n <= 0) {
             break;
         }
@@ -479,7 +516,7 @@ static void cmd_clientconnected(Stream &io, const char *name, char op, char *arg
         reply_error(io, name);
         return;
     }
-    reply_int(io, name, clients[s].connected() ? 1 : 0);
+    reply_int(io, name, client_of(s).connected() ? 1 : 0);
 }
 
 static void cmd_clientclose(Stream &io, const char *name, char op, char *args)
@@ -501,7 +538,7 @@ static void cmd_flush(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    clients[s].flush();
+    client_of(s).flush();
     reply(io, name, "");
 }
 
@@ -512,7 +549,7 @@ static void cmd_remoteip(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    reply(io, name, clients[s].remoteIP().toString().c_str());
+    reply(io, name, client_of(s).remoteIP().toString().c_str());
 }
 
 static void cmd_remoteport(Stream &io, const char *name, char op, char *args)
@@ -522,7 +559,155 @@ static void cmd_remoteport(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    reply_int(io, name, clients[s].remotePort());
+    reply_int(io, name, client_of(s).remotePort());
+}
+
+/* 已由 BEGINSERVER 分配的服务端号，否则 -1 */
+static int server_arg(const char *s)
+{
+    long v;
+    return parse_long(s, &v) && v >= 0 && v < MAX_SERVERS && server_allocated[v] ? (int)v : -1;
+}
+
+/* 接入连接的空位；没有时取连接已断且数据读完的位置（先关掉，同上游按 connected() 回收）；都没有时 -1 */
+static int free_conn(void)
+{
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        if (conns[i].server < 0) {
+            return i;
+        }
+    }
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        if (!conns[i].client.connected()) {
+            close_socket(SERVER_SOCK_BASE + i);
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* AT+BEGINSERVER=<端口>：应答服务端号 */
+static void cmd_beginserver(Stream &io, const char *name, char op, char *args)
+{
+    long port;
+    if (op == '=' && parse_long(args, &port) && port >= 1 && port <= 65535) {
+        for (int v = 0; v < MAX_SERVERS; v++) {
+            if (!server_allocated[v]) {
+                servers[v].begin((uint16_t)port);
+                if (!servers[v]) {
+                    break;
+                }
+                server_allocated[v] = true;
+                reply_int(io, name, v);
+                return;
+            }
+        }
+    }
+    reply_error(io, name);
+}
+
+/*
+ * AT+SERVERAVAILABLE=<srv>（WiFiServer::available）：把新连接收进空位，再从上次返回的位置起找一个有数据可读、
+ * 未被 SERVERACCEPT 取走的连接，应答其编号；没有时应答 -1（同上游）
+ */
+static void cmd_serveravailable(Stream &io, const char *name, char op, char *args)
+{
+    static int last;
+    int v = op == '=' ? server_arg(args) : -1;
+    if (v < 0) {
+        reply_error(io, name);
+        return;
+    }
+    for (int i = free_conn(); i >= 0; i = free_conn()) {
+        WiFiClient c = servers[v].accept();
+        if (!c) {
+            break;
+        }
+        conns[i].client = c;
+        conns[i].server = v;
+        conns[i].accepted = false;
+    }
+    for (int k = 0; k < MAX_SOCKETS; k++) {
+        int i = (last + k) % MAX_SOCKETS;
+        if (conns[i].server == v && !conns[i].accepted && conns[i].client.available() > 0) {
+            last = i;
+            reply_int(io, name, SERVER_SOCK_BASE + i);
+            return;
+        }
+    }
+    reply_int(io, name, -1);
+}
+
+/* AT+SERVERACCEPT=<srv>（WiFiServer::accept）：取一个新连接交给主机，应答其编号；没有时 -1 */
+static void cmd_serveraccept(Stream &io, const char *name, char op, char *args)
+{
+    int v = op == '=' ? server_arg(args) : -1;
+    if (v < 0) {
+        reply_error(io, name);
+        return;
+    }
+    int i = free_conn();
+    WiFiClient c = i >= 0 ? servers[v].accept() : WiFiClient();
+    if (!c) {
+        reply_int(io, name, -1);
+        return;
+    }
+    conns[i].client = c;
+    conns[i].server = v;
+    conns[i].accepted = true;
+    reply_int(io, name, SERVER_SOCK_BASE + i);
+}
+
+/* SERVERWRITE 的去处：服务端 srv 由 SERVERAVAILABLE 收下、仍连着的连接；返回各连接都写出的字节数 */
+class ServerSink : public Print {
+public:
+    explicit ServerSink(int srv) : srv_(srv) {}
+    size_t write(uint8_t b) override { return write(&b, 1); }
+    size_t write(const uint8_t *buf, size_t n) override
+    {
+        size_t least = n;
+        for (auto &c : conns) {
+            if (c.server == srv_ && !c.accepted && c.client.connected()) {
+                least = min(least, c.client.write(buf, n));
+            }
+        }
+        return least;
+    }
+    using Print::write;
+
+private:
+    int srv_;
+};
+
+/* AT+SERVERWRITE=<srv>,<n> 后紧跟 n 个原始字节；同 CLIENTSEND，成功只回裸 "OK" */
+static void cmd_serverwrite(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[2];
+    long left;
+    if (op != '=' || split(args, argv, 2) != 2 || !parse_long(argv[1], &left) || left < 0) {
+        reply_error(io, name);
+        return;
+    }
+    int v = server_arg(argv[0]);
+    ServerSink sink(v);
+    if (read_payload(io, left, v >= 0 ? &sink : nullptr)) {
+        io.print("OK\r\n");
+    } else {
+        reply_error(io, name);
+    }
+}
+
+/* 停止监听；已接入的连接保留，主机照常用 CLIENT* 命令（同上游） */
+static void cmd_serverend(Stream &io, const char *name, char op, char *args)
+{
+    int v = op == '=' ? server_arg(args) : -1;
+    if (v < 0) {
+        reply_error(io, name);
+        return;
+    }
+    servers[v].end();
+    server_allocated[v] = false;
+    reply(io, name, "");
 }
 
 /* AT+UDPBEGIN=<本地端口>[,<本地地址>]：应答 UDP 编号 */
@@ -736,6 +921,11 @@ static const struct {
     { "+FLUSH", cmd_flush },
     { "+REMOTEIP", cmd_remoteip },
     { "+REMOTEPORT", cmd_remoteport },
+    { "+BEGINSERVER", cmd_beginserver },
+    { "+SERVERAVAILABLE", cmd_serveravailable },
+    { "+SERVERACCEPT", cmd_serveraccept },
+    { "+SERVERWRITE", cmd_serverwrite },
+    { "+SERVEREND", cmd_serverend },
     /* 组播（UDPBEGINMULTI、BEGINPACKETMULTI）未实现，按未知命令回 ERROR */
     { "+UDPBEGIN", cmd_udpbegin },
     { "+UDPBEGINPACKETIP", cmd_udpbeginpacketip },

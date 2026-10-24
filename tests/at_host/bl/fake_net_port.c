@@ -17,6 +17,8 @@
 #include "fake_ports.h"
 #include "net_port.h"
 
+static uint32_t close_counts[1024]; /* 按 fd 计 */
+
 static void require_wifi(const char *fn)
 {
     if (!fake_wifi_up) {
@@ -137,7 +139,46 @@ int net_port_peer(int sock, uint32_t *addr, uint16_t *port)
 void net_port_close(int sock)
 {
     require_wifi(__func__);
+    if (sock >= 0 && sock < 1024) {
+        close_counts[sock]++;
+    }
     close(sock);
+}
+
+uint32_t net_port_close_count(int sock)
+{
+    return sock >= 0 && sock < 1024 ? close_counts[sock] : 0;
+}
+
+int net_port_tcp_listen(uint16_t port)
+{
+    require_wifi(__func__);
+    int one = 1;
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    if (bind(sock, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(sock, 4) != 0) {
+        close(sock);
+        return -1;
+    }
+    fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
+    return sock;
+}
+
+int net_port_tcp_accept(int listen_sock)
+{
+    require_wifi(__func__);
+    int sock = accept(listen_sock, NULL, NULL);
+    if (sock >= 0) {
+        fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) & ~O_NONBLOCK);
+    }
+    return sock;
 }
 
 int net_port_udp_open(uint32_t addr, uint16_t port)
