@@ -395,6 +395,70 @@ static void staticip_tests(const char *ssid, const char *pass, uint16_t echo_por
     printf("SOFTRESETDHCP %d %d %s\n", reset, st, ip_s(WiFi.localIP()));
 }
 
+/* 已连上（DHCP）时调用；结束时 AP 已停止、STA 未连接 */
+static void ap_tests(const char *ssid, const char *pass, uint16_t port, uint16_t udp_port)
+{
+    std::string res;
+    uint8_t mac[6];
+    /* SSID()、softAPSSID() 共用 WiFiS3 的同一个缓冲区，分开输出 */
+    int st = WiFi.beginAP("bl-ap", "ap-pass-1", 6);
+    printf("APBEGIN %d %d %s %s %s %s\n", st, WiFi.status(), ip_s(WiFi.localIP()), ip_s(WiFi.subnetMask()),
+           ip_s(WiFi.gatewayIP()), ip_s(WiFi.softAPIP()));
+    printf("APSSID %s\n", WiFi.SSID());
+    printf("APSOFTSSID %s\n", WiFi.softAPSSID());
+    mac_line("APMAC", WiFi.macAddress(mac));
+    printf("APSTA %s %s\n", ip_s(WiFi.dnsIP(0)), WiFi.RSSI() == 0 ? "0" : "x");
+    {
+        /* AP 运行时（STA 未连接）TCP 服务端、按地址连接、UDP 可用 */
+        WiFiServer srv(port);
+        srv.begin();
+        WiFiClient c;
+        int r = c.connect(loopback, port);
+        c.print("x");
+        WiFiClient a;
+        unsigned long t = millis();
+        while (!(a = srv.available()) && millis() - t < 3000) {
+            delay(10);
+        }
+        int got = a ? a.read() : -1;
+        printf("APSERVER %d %d %d\n", (int)(bool)srv, r, got);
+        c.stop();
+        a.stop();
+        srv.end();
+        WiFiUDP u;
+        printf("APUDP %d\n", (int)u.begin(udp_port));
+        u.stop();
+    }
+    /* WiFiS3 的 config 先发 SOFTAPCONFIG（网关即地址）再发 SETIP */
+    WiFi.config(IPAddress(192, 48, 56, 2));
+    st = WiFi.beginAP("bl-ap2", "ap-pass-2");
+    printf("APCONFIG %d %d %s %s\n", st, WiFi.status(), ip_s(WiFi.localIP()), ip_s(WiFi.subnetMask()));
+    printf("APSSID2 %s\n", WiFi.softAPSSID());
+    st = WiFi.beginAP("bl-open");
+    printf("APOPEN %d %d\n", st, WiFi.status());
+    /* 平台拒绝的参数回 0、运行中的 AP 不受影响；底层启动失败后状态为 WL_AP_FAILED */
+    int shortpass = WiFi.beginAP("bl-ap", "short");
+    int badch = WiFi.beginAP("bl-ap", "ap-pass-1", 14);
+    printf("APBAD %d %d %d\n", shortpass, badch, WiFi.status());
+    st = WiFi.beginAP("ap-fail", "ap-pass-1");
+    printf("APFAIL %d %d\n", st, WiFi.status());
+    bool hidden = modem.write(std::string(PROMPT(_BEGINSOFTAP)), res, "%s%s\r\n", CMD_WRITE(_BEGINSOFTAP),
+                              "bl-ap,ap-pass-1,6,1");
+    bool cfgbad = modem.write(std::string(PROMPT(_SOFTAPCONFIG)), res, "%s%s\r\n", CMD_WRITE(_SOFTAPCONFIG),
+                              "192.168.4.1,192.168.4.1");
+    printf("APERR %d %d\n", hidden, cfgbad);
+    /* begin 先发 WIFIMODE=1：停止 AP，STA 照常连上 */
+    WiFi.beginAP("bl-ap", "ap-pass-1");
+    WiFi.config(IPAddress(0, 0, 0, 0));
+    st = WiFi.begin(ssid, pass);
+    printf("APTOSTA %d %d %s %s\n", st, WiFi.status(), ip_s(WiFi.localIP()), ip_s(WiFi.softAPIP()));
+    /* end 发 SOFTRESETWIFI：停止 AP */
+    WiFi.beginAP("bl-ap", "ap-pass-1");
+    int before = WiFi.status();
+    WiFi.end();
+    printf("APEND %d %d %s\n", before, WiFi.status(), ip_s(WiFi.softAPIP()));
+}
+
 static void scan(const char *item)
 {
     unsigned long t = millis();
@@ -536,6 +600,7 @@ extern "C" int host_main(int argc, char **argv)
     udp_tests(udp_echo_port, udp_local_port);
     server_tests(server_ports);
     staticip_tests(ssid, pass, echo_port);
+    ap_tests(ssid, pass, server_ports[1], udp_local_port);
     {
         std::string res;
         t = millis();

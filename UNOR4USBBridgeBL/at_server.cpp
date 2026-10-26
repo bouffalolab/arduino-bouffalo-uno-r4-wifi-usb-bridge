@@ -27,8 +27,8 @@ static bool line_overflow;
 /* CLIENTSEND、UDPWRITE 的分块，CLIENTRECEIVE、UDPREAD、WIFISCAN 的应答共用；UDPREAD 一次最多一个数据报 */
 static uint8_t data[WIFI_UDP_BUFFER_SIZE];
 
-static int wifi_mode;    /* AT+WIFIMODE：0 未设置，1 STA */
-static bool sta_started; /* 发起过 BEGINSTA：Wi-Fi 协议栈已初始化，断开才有意义 */
+static int wifi_mode;     /* AT+WIFIMODE：0 未设置，1 STA，2 AP */
+static bool wifi_started; /* 发起过 BEGINSTA 或 BEGINSOFTAP：Wi-Fi 协议栈已初始化，断开、停止 AP 才有意义 */
 static WiFiClient clients[MAX_SOCKETS];
 static bool allocated[MAX_SOCKETS];
 static WiFiUDP udps[MAX_UDP];
@@ -229,8 +229,8 @@ static void cmd_softreset(Stream &io, const char *name, char op, char *args)
     for (int u = 0; u < MAX_UDP; u++) {
         close_udp(u);
     }
-    if (sta_started) {
-        WiFi.disconnect();
+    if (wifi_started) {
+        WiFi.end(); /* 断开 STA、停止 AP，同上游 */
     }
     WiFi.config(IPAddress(0, 0, 0, 0)); /* 恢复 DHCP，同上游 */
     wifi_mode = 0;
@@ -262,13 +262,27 @@ static void cmd_fwversion_u32(Stream &io, const char *name, char op, char *args)
     io.print("\r\nOK\r\n");
 }
 
-/* 只支持 STA（1）；AP 未实现 */
+static bool ap_running()
+{
+    uint8_t st = WiFi.status();
+    return st == WL_AP_LISTENING || st == WL_AP_CONNECTED;
+}
+
+/*
+ * 1 STA、2 AP，同上游：切到 STA 时停止 AP（STA 不断开，WiFiS3 每次 begin 都先发 WIFIMODE=1），切到 AP 时断开 STA。
+ * 0（关闭）与 3（STA 与 AP 同时运行）未实现
+ */
 static void cmd_wifimode(Stream &io, const char *name, char op, char *args)
 {
     if (op == '?') {
         reply_int(io, name, wifi_mode);
-    } else if (op == '=' && strcmp(args, "1") == 0) {
-        wifi_mode = 1;
+    } else if (op == '=' && (strcmp(args, "1") == 0 || strcmp(args, "2") == 0)) {
+        wifi_mode = args[0] - '0';
+        if (wifi_mode == 1 && ap_running()) {
+            WiFi.end(); /* AP 运行时 STA 未连接，这里只停止 AP */
+        } else if (wifi_mode == 2 && wifi_started) {
+            WiFi.disconnect();
+        }
         reply(io, name, "");
     } else {
         reply_error(io, name);
@@ -290,7 +304,7 @@ static void cmd_beginsta(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    sta_started = true;
+    wifi_started = true;
     reply(io, name, "");
 }
 
@@ -345,6 +359,79 @@ static void cmd_setip(Stream &io, const char *name, char op, char *args)
         WiFi.setDNS(ip[3], ip[4]);
     }
     reply(io, name, "");
+}
+
+/*
+ * AT+BEGINSOFTAP=<ssid>[,<密码>[,<信道>]]：应答 1（WL_AP_LISTENING）或 0，同上游；底层启动失败后 GETSTATUS 为 9，
+ * 平台拒绝的参数（密码不足 8 个字符、信道不在 1–13）只回 0。空密码为开放网络。
+ * 上游的第 4、5 个参数（隐藏 SSID、最大连接数，WiFiS3 不发）未实现，回 ERROR
+ */
+static void cmd_beginsoftap(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[3];
+    long ch = 1;
+    int n = op == '=' ? split(args, argv, 3) : 0;
+    if (n == 0 || argv[0][0] == '\0' || (n == 3 && !parse_long(argv[2], &ch))) {
+        reply_error(io, name);
+        return;
+    }
+    wifi_started = true;
+    uint8_t st = WiFi.beginAP(argv[0], n > 1 ? argv[1] : "", ch >= 0 && ch <= 255 ? (uint8_t)ch : 0);
+    reply(io, name, st == WL_AP_LISTENING ? "1" : "0");
+}
+
+/*
+ * AT+SOFTAPCONFIG=<地址>,<网关>,<掩码>：AP 的地址与掩码。平台的 STA 与 AP 共用一套地址配置（同 WiFiNINA），这里按
+ * config(地址, 网关, 网关, 掩码) 设置，也改 STA 的静态地址；WiFiS3 的 config 随后总会发 SETIP 设好 STA，结果与上游相同
+ */
+static void cmd_softapconfig(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[3];
+    IPAddress ip[3];
+    int n = op == '=' ? split(args, argv, 3) : 0;
+    bool ok = n == 3;
+    for (int i = 0; i < n && ok; i++) {
+        ok = ip[i].fromString(argv[i]);
+    }
+    if (!ok) {
+        reply_error(io, name);
+        return;
+    }
+    WiFi.config(ip[0], ip[1], ip[1], ip[2]);
+    reply(io, name, "");
+}
+
+/* AT+IPSOFTAP（不带 '?'，同上游）：AP 未运行时为 0.0.0.0 */
+static void cmd_ipsoftap(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op != '\0') {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, WiFi.softAPIP().toString().c_str());
+}
+
+static void cmd_getsoftapssid(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op != '?') {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, WiFi.softAPSSID());
+}
+
+/* SDK 的 AP 与 STA 接口用同一个 MAC 地址 */
+static void cmd_macsoftap(Stream &io, const char *name, char op, char *args)
+{
+    uint8_t mac[WL_MAC_ADDR_LENGTH];
+    (void)args;
+    if (op != '?') {
+        reply_error(io, name);
+        return;
+    }
+    reply_mac(io, name, WiFi.macAddress(mac));
 }
 
 static void cmd_getssid(Stream &io, const char *name, char op, char *args)
@@ -435,7 +522,7 @@ static void cmd_disconnect(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    if (sta_started) {
+    if (wifi_started) {
         WiFi.disconnect();
     }
     reply(io, name, "");
@@ -485,13 +572,14 @@ static void cmd_beginclient(Stream &io, const char *name, char op, char *args)
     reply_error(io, name);
 }
 
-/* 主机名或点分地址都经 connect(host) 解析；SSL 连接先设好 SETCAROOT 给的证书。服务端接入的连接不能再连 */
+/* SSL 连接先设好 SETCAROOT 给的证书。服务端接入的连接不能再连 */
 static void connect_socket(Stream &io, const char *name, char **argv, long timeout_ms)
 {
     long port;
+    IPAddress ip;
     int s = socket_arg(name, argv[0]);
     if (s < 0 || (s >= SERVER_SOCK_BASE && s < SSL_SOCK_BASE) || !parse_long(argv[2], &port) || port < 1 ||
-        port > 65535 || WiFi.status() != WL_CONNECTED) {
+        port > 65535) {
         reply_error(io, name);
         return;
     }
@@ -499,7 +587,9 @@ static void connect_socket(Stream &io, const char *name, char **argv, long timeo
         ssls[s - SSL_SOCK_BASE].setCACert(ssl_ca[s - SSL_SOCK_BASE]);
     }
     client_of(s).setConnectionTimeout(timeout_ms);
-    if (!client_of(s).connect(argv[1], (uint16_t)port)) {
+    /* 点分地址的 TCP 连接用 connect(IPAddress)，AP 运行时也可用；域名与 TLS 要 STA 已连接。是否联网由平台判断 */
+    bool by_ip = s < SSL_SOCK_BASE && ip.fromString(argv[1]);
+    if (!(by_ip ? client_of(s).connect(ip, (uint16_t)port) : client_of(s).connect(argv[1], (uint16_t)port))) {
         reply_error(io, name);
         return;
     }
@@ -1074,6 +1164,12 @@ static const struct {
     { "+GETRSSI", cmd_getrssi },
     { "+GETBSSID", cmd_getbssid },
     { "+MACSTA", cmd_macsta },
+    /* AP：DISCONNECTSOFTAP（WiFiS3 不发）未实现，按未知命令回 ERROR */
+    { "+BEGINSOFTAP", cmd_beginsoftap },
+    { "+SOFTAPCONFIG", cmd_softapconfig },
+    { "+IPSOFTAP", cmd_ipsoftap },
+    { "+GETSOFTAPSSID", cmd_getsoftapssid },
+    { "+MACSOFTAP", cmd_macsoftap },
     { "+WIFISCAN", cmd_wifiscan },
     { "+DISCONNECT", cmd_disconnect },
     { "+HOSTBYNAME", cmd_hostbyname },

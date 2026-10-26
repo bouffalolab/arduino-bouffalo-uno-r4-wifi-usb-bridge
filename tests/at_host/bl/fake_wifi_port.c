@@ -4,6 +4,7 @@
  * 失败时的状态码与实板一致：密码错误 2，找不到 SSID 12。
  * 扫描：第一次给出 scan_table 中按 RSSI 排好的前 max 个，第二次 0 个，之后都失败；run.py 按同一张表核对。
  * 地址：DHCP 时报 FAKE_*；静态地址与 setDNS 的规则同平台 wifi_port.c，只改报出的地址（socket 仍在回环上）。
+ * AP：地址规则同平台（未配置时 192.168.4.1/24）；没有设备会连上，状态只有 AP_LISTENING；SSID 为 "ap-fail" 时模拟底层启动失败。
  */
 #include <arpa/inet.h>
 #include <stdlib.h>
@@ -24,6 +25,8 @@ static uint64_t ready_at;
 static uint16_t last_status;
 static uint32_t cfg_ip, cfg_mask, cfg_gw, cfg_dns[2]; /* 网络字节序；cfg_ip 为 0 时用 DHCP */
 static uint32_t dns_now[2];
+static bool ap_up, ap_failed;
+static uint32_t ap_ip, ap_mask;
 
 static void use_dhcp_dns(void)
 {
@@ -102,7 +105,16 @@ void wifi_port_disconnect(uint32_t timeout_ms)
 enum wifi_port_state wifi_port_state(void)
 {
     settle();
-    return state;
+    if (ap_up) {
+        return WIFI_PORT_AP_LISTENING;
+    }
+    return ap_failed ? WIFI_PORT_AP_FAILED : state;
+}
+
+bool wifi_port_net_up(void)
+{
+    enum wifi_port_state s = wifi_port_state();
+    return s == WIFI_PORT_CONNECTED || s == WIFI_PORT_AP_LISTENING;
 }
 
 bool wifi_port_connecting(void)
@@ -119,6 +131,11 @@ void wifi_port_last_error(uint16_t *status, uint16_t *reason)
 
 void wifi_port_ip(uint32_t *ip, uint32_t *mask, uint32_t *gw)
 {
+    if (ap_up) {
+        *ip = *gw = ap_ip;
+        *mask = ap_mask;
+        return;
+    }
     bool up = wifi_port_state() == WIFI_PORT_CONNECTED;
     *ip = !up ? 0 : cfg_ip != 0 ? cfg_ip : htonl(FAKE_IP);
     *mask = !up ? 0 : cfg_ip != 0 ? cfg_mask : htonl(FAKE_MASK);
@@ -220,4 +237,28 @@ int wifi_port_scan(struct wifi_port_ap *aps, int max, uint32_t timeout_ms)
         case 1: return 0;
         default: return -1;
     }
+}
+
+int wifi_port_ap_start(const char *ssid, const char *pass, uint8_t channel, uint32_t timeout_ms)
+{
+    (void)pass;
+    (void)channel;
+    (void)timeout_ms;
+    ap_up = false;
+    ap_failed = false;
+    if (strcmp(ssid, "ap-fail") == 0) {
+        ap_failed = true;
+        return -1;
+    }
+    ap_ip = cfg_ip != 0 ? cfg_ip : htonl(0xC0A80401u);
+    ap_mask = cfg_ip != 0 ? cfg_mask : htonl(0xFFFFFF00u);
+    ap_up = true;
+    return 0;
+}
+
+void wifi_port_ap_stop(uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    ap_up = false;
+    ap_failed = false;
 }

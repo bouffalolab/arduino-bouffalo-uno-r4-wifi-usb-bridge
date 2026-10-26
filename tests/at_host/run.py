@@ -385,6 +385,23 @@ def main():
     check("config(0.0.0.0) 恢复 DHCP 的地址与 DNS（%s）" % v("SETIPDHCP"),
           v("SETIPDHCP") == ["127.0.0.1", "127.0.0.1", "127.0.0.53"])
     check("SOFTRESETWIFI 恢复 DHCP（%s）" % v("SOFTRESETDHCP"), v("SOFTRESETDHCP") == ["1", "3", "127.0.0.1"])
+    check("已连 STA 时 beginAP：返回与状态为 7，localIP、掩码、网关、softAPIP 为默认 192.168.4.1/24（%s）" % v("APBEGIN"),
+          v("APBEGIN") == ["7", "7", "192.168.4.1", "255.255.255.0", "192.168.4.1", "192.168.4.1"])
+    check("AP 模式下 SSID()、softAPSSID() 为 AP 的名称，macAddress 走 MACSOFTAP（%s %s %s）"
+          % (v("APSSID"), v("APSOFTSSID"), v("APMAC")),
+          v("APSSID") == ["bl-ap"] and v("APSOFTSSID") == ["bl-ap"] and v("APMAC") == ["02:00:00:00:00:01"])
+    check("beginAP 已断开 STA：DNS、RSSI 为 0（%s）" % v("APSTA"), v("APSTA") == ["0.0.0.0", "0"])
+    check("AP 运行时服务端 begin、按地址连接、accept 后读到数据（%s）" % v("APSERVER"), n("APSERVER") == [1, 1, ord("x")])
+    check("AP 运行时 WiFiUDP.begin 成功（%s）" % v("APUDP"), n("APUDP") == [1])
+    check("config(地址) 后 beginAP：AP 用该地址与 /24（%s，%s）" % (v("APCONFIG"), v("APSSID2")),
+          v("APCONFIG") == ["7", "7", "192.48.56.2", "255.255.255.0"] and v("APSSID2") == ["bl-ap2"])
+    check("beginAP(ssid) 开放网络（%s）" % v("APOPEN"), n("APOPEN") == [7, 7])
+    check("密码过短、信道 14：返回 WL_AP_FAILED，运行中的 AP 不受影响（%s）" % v("APBAD"), n("APBAD") == [9, 9, 7])
+    check("底层启动失败：返回与状态为 WL_AP_FAILED（%s）" % v("APFAIL"), n("APFAIL") == [9, 9])
+    check("BEGINSOFTAP 带隐藏 SSID 参数、SOFTAPCONFIG 参数不足：ERROR（%s）" % v("APERR"), n("APERR") == [0, 0])
+    check("AP 运行时 begin：停止 AP，STA 用 DHCP 连上（%s）" % v("APTOSTA"),
+          v("APTOSTA") == ["3", "3", "127.0.0.1", "0.0.0.0"])
+    check("end（SOFTRESETWIFI）停止 AP（%s）" % v("APEND"), v("APEND") == ["7", "6", "0.0.0.0"])
     u = n("UNKNOWN")
     check("未知命令 1 s 内失败（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
     check("disconnect 后 status 为 WL_DISCONNECTED（%s）" % v("DISC"), n("DISC") == [6])
