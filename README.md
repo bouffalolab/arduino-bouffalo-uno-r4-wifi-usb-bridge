@@ -4,7 +4,7 @@
 
 目标是以 BL616CL 替代 UNO R4 WiFi 的 ESP32-S3，承接无线协处理器及 USB 桥接功能；RA4M1 继续运行用户程序。
 
-当前阶段：首轮演示的两项（USB 串口透传、RA4M1 发 AT 联网与 TCP 客户端）已在首块板上实测通过；CMSIS-DAP 尚未实现。
+当前阶段：USB 串口透传、RA4M1 AT 网络与 CMSIS-DAP/SWD 已在首块板上实测；初版的其他必备功能与发布门槛见路线。
 
 通用平台达到桥接应用所需的最小基线后，优先交付 bridge。应用管理 AT、RA4M1 引脚和 CMSIS-DAP，通过通用平台接口使用底层能力。
 
@@ -12,14 +12,14 @@
 
 ## 构建与上传
 
-固件是 arduino-bl 平台上的 sketch `UNOR4USBBridgeBL/`，FQBN `bouffalolab:bl:unor4wifi_bl616cl`。默认按 1V0 模组（RA4M1 MD 接 GPIO14）；1V1 模组（MD 接 GPIO10）编译时加 `--build-property compiler.cpp.extra_flags=-DBRIDGE_MODULE_1V1`。
+固件是 arduino-bl 平台上的 sketch `UNOR4USBBridgeBL/`，FQBN `bouffalolab:bl:unor4wifi_bl616cl`，需要含 HID 类的 `bl616cl-libs` 0.4.1。默认按 1V0 模组（MD GPIO14、SWCLK GPIO12、SWDIO GPIO13）；1V1 映射为 MD GPIO10、SWCLK GPIO8、SWDIO GPIO9，需同时设置 `--build-property compiler.cpp.extra_flags=-DBRIDGE_MODULE_1V1` 与 `--build-property compiler.c.extra_flags=-DBRIDGE_MODULE_1V1`，目前未做 1V1 实板验证。
 
 ```sh
 arduino-cli compile -b bouffalolab:bl:unor4wifi_bl616cl --build-path <编译目录> UNOR4USBBridgeBL
 arduino-cli upload -b bouffalolab:bl:unor4wifi_bl616cl -p <串口> --input-dir <编译目录> UNOR4USBBridgeBL
 ```
 
-bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616CL 的 1200 bps touch。更新 bridge 本身要先让 BL616CL 进 ROM 下载模式，再对 ROM 的下载串口（`ffff:ffff`）执行上传。进入下载模式有两种办法：
+bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616CL 的 1200 bps touch。更新 bridge 本身要先让 BL616CL 进 ROM 下载模式，再对 ROM 的下载串口（`ffff:ffff`）执行上传。进入下载模式有三种办法：
 
 - RA4M1 发 `AT+RESTARTBOOTLOADER`（官方入口）：bridge 回 `OK` 后复位进 ROM 下载模式。WiFiS3 没有封装这条命令，RA4M1 sketch 这样发：
 
@@ -32,6 +32,7 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
   ```
 
 - BL616CL 复位时 GPIO36（J6.4）为高电平。
+- 对 vendor HID 的 report ID 0 发送 Feature，载荷首字节为 `0xAA`（Linux hidraw 调用时前置 report ID 字节 0）。GET Feature 返回本 bridge 版本三个字节，当前 `00 01 00`。这是 BL ROM 更新入口，之后使用 BL 上传工具；不兼容 ESP32 固件镜像或其烧录协议。
 
 经 ROM 下载口上传偶尔失败（2026-10-23 首块板 77 次中 3 次：握手失败 2 次，写入中途 ROM 停止应答 1 次；原因未查明，RA4M1 发或不发串口数据的对照各 15 次都没有失败）。失败后 BL616CL 停在 ROM 下载口，可直接再上传；中途失败后断电重启能否启动未测，不能启动时用 GPIO36 进入下载模式。
 
@@ -39,6 +40,7 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 
 | 功能 | 状态 | 证据或说明 |
 | --- | --- | --- |
+| CDC + vendor HID / CMSIS-DAP v1 传输；SWD 访问真实 RA4M1，64 字节、单个在途请求；无 JTAG/SWO | experimental | Linux x86_64、BL616CL 1V0、libs 0.4.1：OpenOCD 0.11.0-arduino2 / pyOCD 0.45.0（Renesas.RA_DFP 6.6.0），100 kHz 请求频率；DPIDR `0x5ba02477`、CPUID `0x410fc241`，SRAM/寄存器读写恢复、sketch 编程与完整读回、硬件断点、单步、复位、三次重连通过。CDC 与持续 SWD 读取并发时 50 B、2 KB、8 KB、64 KB 回显一致；串口上传前主动断开 DAP。来源与修改见 [第三方声明](THIRD_PARTY_NOTICES.md)。 |
 | USB 串口（`Serial`）与 RA4M1 用户串口（`Serial1`，uart0 GPIO34/35 经 U4 接 SCI9）双向透传；其他波特率设为 `Serial1` 的波特率（8N1），每次改动后清空未转发的接收数据 | experimental | 首块板（1V0），Linux：以 FT232 代替 RA4M1 接在 GPIO34/35，115200、9600、230400、921600 下双向各 1–8 KB 逐字节一致；921600 下双向同时各 64 KB 连续 3 轮一致；重新打开端口后跟随波特率。接 RA4M1（R47/R48 补焊后）：115200 下回显 50 字节、2 KB 一致 |
 | 1200：MD 高、RESET 双击，RA4M1 进 bootloader；2400：MD 低、RESET 一次，RA4M1 进 ROM 下载模式，MD 保持低到下一次 1200（同官方 bridge） | experimental | 首块板（1V0），Linux：arduino-cli（renesas 1.6.0，unor4wifi）经 bridge 给 RA4M1 上传并运行，bossac 以 921600 连上 bootloader；2400 后 RA4M1 ROM 应答同步（0x00→0x00、0x55→0xC3），再经 1200 上传恢复；1200 时 BL616CL 不进下载模式 |
 | AT 命令（`Serial2`，uart1 GPIO6/7 经 U4 接 RA4M1 SCI1，115200 8N1，独立任务处理）：WiFiS3 的 STA、AP 与 TCP 客户端，即 SOFTRESETWIFI、FWVERSION、WIFIMODE（支持 1 STA、2 AP）、BEGINSTA、BEGINSOFTAP、SOFTAPCONFIG、IPSOFTAP、GETSOFTAPSSID、MACSOFTAP、GETSTATUS、IPSTA、GETSSID、GETRSSI、GETBSSID、MACSTA、DISCONNECT、HOSTBYNAME、PING、BEGINCLIENT、CLIENTCONNECTNAME、CLIENTCONNECT、CLIENTSEND、AVAILABLE、CLIENTRECEIVE、CLIENTCONNECTED、CLIENTCLOSE、FLUSH、REMOTEIP、REMOTEPORT；失败回 `+<命令>:ERROR`（冒号后不带空格，否则 WiFiS3 在 CLIENTRECEIVE、WIFISCAN 等命令上认不出、要等满 10 s） | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3（renesas 1.6.0）：连 WPA3 网络 5.4 s 取得地址，DNS、ping 网关、按地址与域名连 80 端口 HTTP 收发、3000 字节 POST 正文写出、断开均正常；与局域网电脑上的 TCP 回显服务收发 1 B–4 KB 二进制负载（含 0x00、CRLF），两端逐字节一致；同一固件下透传与经 bridge 上传回归通过 |
@@ -50,9 +52,34 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 | 静态地址（WiFiS3 `config`、`setDNS`）：SETIP（地址、网关、掩码，可再带 1–2 个 DNS），调用平台 `WiFi.config`、`setDNS`；地址为 0.0.0.0 时恢复 DHCP，SOFTRESETWIFI 也恢复 DHCP（同上游）。WiFiS3 的 `config` 先发 SOFTAPCONFIG 设置 AP 地址，再发 SETIP 设置 STA 地址 | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3（renesas 1.6.0）：与平台相同的一组检查全部通过（连接前与已连接时设静态地址、断开重连、`setDNS`、恢复 DHCP、DHCP 下 `setDNS` 转为静态地址；ping 网关、DNS 解析、与电脑 TCP 回显、电脑 ping 板子）。主机对接测试覆盖已连接时生效、两个 DNS、重连保持、`config(地址)` 的默认值、参数不足与不合法地址、恢复 DHCP、SOFTRESETWIFI |
 | AP（WiFiS3 `beginAP`、`softAPIP`、`softAPSSID`）：BEGINSOFTAP（SSID、密码、可选信道）、SOFTAPCONFIG、IPSOFTAP、GETSOFTAPSSID、MACSOFTAP；WIFIMODE=2 切换到 AP，WIFIMODE=1 / `begin` 回 STA；AP 与 STA 不并行 | experimental | 主机对接测试：78/78；红测 78 项中 8 项 AP 相关失败，合入后全绿。首块板（1V0）：run-ap-2 全套 34/34；电脑连入取得 DHCP 地址、状态 8、ping 应答，TCP/UDP 回显正常，SOFTRESETWIFI 停止 AP；AP→STA 的 `begin` 路径在平台实板与 bridge 主机测试中通过，bridge 实板尚未覆盖。证据见工作区 [AP 验证记录](../.tasks/2026-10-21-arduino-bl-platform/subtasks/ST008-bridge-features/work/2026-10-26-ap.txt) |
 | `AT+FWVERSION_U32`（WiFiS3 `firmwareVersionU32()`）：版本三段各一个原始字节再加 0（同上游），WiFiS3 取前 3 字节；某段为 10、13、32 或 124 时 WiFiS3 的解析会出错（上游相同，本固件为 0.1.0） | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3：读到 0x000100，连读两次相同。主机对接测试覆盖 |
-| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、HOSTNAME、时间、文件系统、OTA、BLE、CMSIS-DAP | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
+| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、HOSTNAME、时间、文件系统、OTA、BLE | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
+
+## SWD 调试与编程
+
+USB HID 使用 vendor page `0xFF00`、无 report ID、64 字节 Input/Output/Feature。DAP 只走中断 OUT/IN，不能用 HID SET_REPORT Output 替代；Feature 走控制端点。DAP 与线路切换都在主循环执行，USB 中断只搬运数据。1200/2400 会断开 DAP、释放 SWD 并接管 RESET；调试工具随后需要重新连接。普通 CDC 透传可与 SWD 访问并行。
+
+Linux 需要 USB 与 hidraw 访问权限，安装平台的 [udev 规则](../arduino-bl/tools/99-arduino-bl.rules) 后重插板子；未配置时 OpenOCD 可能报告找不到设备。已验证的调试入口：
+
+```sh
+openocd -f tools/ra4m1_swd.cfg
+# 然后用 Cortex-M GDB 连接 localhost:3333。
+```
+
+该 OpenOCD 配置提供调试和内存访问，未配置 RA4M1 Flash 驱动。编程使用 pyOCD 0.45.0 与 `Renesas.RA_DFP` 6.6.0；先 `pyocd pack install r7fa4m1ab`，用 `pyocd list` 查板子的 USB 序列号。仅将 `arduino:renesas_uno:unor4wifi` 生成的 sketch `.bin` 写到 `0x4000`，长度不得超过 `0x3C000`。`0x0000–0x3FFF` 是 bootloader，DataFlash/配置区不在此上传范围；先保存需要保留的原始固件。
+
+```sh
+pyocd commander -u <USB序列号> -t r7fa4m1ab -f 100000 \
+  -O auto_unlock=false -O chip_erase=sector \
+  -O smart_flash=false -O keep_unwritten=true \
+  -c "reset halt" -c "load sketch.bin 0x4000" \
+  -c "compare 0x4000 sketch.bin" -c reset
+```
+
+编程前的 `reset halt` 必须保留：本轮从运行中的 Arduino 程序直接加载 Flash 算法时初始化失败，明确复位并停止后编程通过。SWCLK 是软件产生的，请求 100 kHz 已验证；GPIO 与调度开销会降低实际频率。1V1、其他主机、JTAG/SWO 和更高频率没有本轮证据。
 
 ## 测试
+
+运行中的 bridge 可执行 `python3 tests/dap_hid_check.py /dev/hidrawN`，核对设备身份、能力/包长、错误命令、非法时钟、连续请求和 Feature 版本，共 110 项；不改写目标内存。SWD 编程、调试和 USB/串口组合实板记录在工作区 [ARDUINO-42 任务](../.tasks/2026-10-26-arduino-42-usb-dap/STATUS.md)。
 
 `tests/at_host/run.py` 在电脑上做 AT 对接测试：RA4M1 侧是未修改的 WiFiS3（直接编译已安装的 `arduino:renesas_uno` 包里的源码），BL616CL 侧是本仓库的 AT 服务端加 arduino-bl 的 WiFi 库，其中 Wi-Fi 换成虚拟 AP、socket 换成本机 socket；两个程序经 socketpair 相连，逐项核对扫描、联网、地址查询、DNS、ping、TCP 收发、UDP 收发、TCP 服务端、TLS 客户端、静态地址、AP 与 STA/AP 切换、固件版本、socket 上限、错误应答与 RESTARTBOOTLOADER，共 78 项；UDP 对端是本脚本在 127.0.0.1 起的 UDP 回显服务，TCP 服务端的对端是本脚本中的客户端线程；TLS 换成不加密的替身（`tests/at_host/bl/fake_tls_port.c`），只核对命令把主机名、证书参数与数据交给平台，不检验加密与证书校验。需要 `g++`、`python3`，arduino-bl 默认取本仓库旁边的目录（`--platform` 可改）：
 

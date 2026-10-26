@@ -6,7 +6,8 @@
 #include "WiFi.h"
 #include "at_server.h"
 
-#define FW_VERSION         "0.1.0" /* 本固件版本，AT+FWVERSION 返回 */
+#include "bridge_version.h"
+#define FW_VERSION         BRIDGE_VERSION_STRING /* 本固件版本，AT+FWVERSION 返回 */
 #define LINE_MAX           256     /* WiFiS3 的请求最长 128 字节 */
 #define MAX_SOCKETS        8       /* 同上游：BEGINCLIENT 分配 0–7 */
 #define MAX_UDP            4       /* 同上游：UDPBEGIN 分配 0–3，与 TCP 的编号各自独立 */

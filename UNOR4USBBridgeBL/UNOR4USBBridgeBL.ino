@@ -12,6 +12,7 @@
 #include "task.h"
 
 #include "at_server.h"
+#include "dap_bridge.h"
 
 #define PIN_RA4M1_RESET 3 // ESP_IO4，经 U4 接 RA4M1 RESET
 #if defined(BRIDGE_MODULE_1V1)
@@ -31,10 +32,10 @@
 
 static uint8_t buf[1024];
 
-// 回调（Core 线路任务）写、loop 读
-static volatile uint32_t user_baud;
+// 回调只通知，线路切换与 DAP 都在 loop 执行，串行访问 RESET/SWD。
+static uint32_t user_baud;
 static volatile uint32_t line_events;
-// 只在回调中使用
+// 只在 loop 中使用
 static uint32_t handled_baud;
 // 只在 loop 中使用
 static uint32_t seen_events;
@@ -61,24 +62,30 @@ static void resetPulse()
 // 控制线变化和重复设置同一波特率不处理（Linux 只在值变化时发 SET_LINE_CODING）。
 static void onLineChange()
 {
+    line_events = line_events + 1;
+}
+
+static void applyLineChange()
+{
     uint32_t baud = Serial.baud();
     if (baud == handled_baud) {
         return;
     }
     handled_baud = baud;
     if (baud == BAUD_BOOTLOADER) {
+        dap_bridge_disconnect();
         digitalWrite(PIN_RA4M1_MD, HIGH);
         resetPulse();
         delay(RESET_PULSE_MS);
         resetPulse();
     } else if (baud == BAUD_ROM) {
+        dap_bridge_disconnect();
         digitalWrite(PIN_RA4M1_MD, LOW);
         delay(RESET_PULSE_MS);
         resetPulse();
     } else {
         user_baud = baud;
     }
-    line_events = line_events + 1;
 }
 
 void setup()
@@ -87,6 +94,7 @@ void setup()
     digitalWrite(PIN_RA4M1_RESET, HIGH);
     pinMode(PIN_RA4M1_MD, OUTPUT);
     pinMode(PIN_RA4M1_RESET, OUTPUT);
+    dap_bridge_begin();
 
     // Core 在 setup() 之前才启动 USB，主机的线路请求在注册回调之后到达；此前是 Core 的默认值
     handled_baud = Serial.baud();
@@ -107,6 +115,7 @@ void loop()
     // 改波特率在 loop 中做：Serial1 的收发也只在这里，不与 begin() 并发
     if (line_events != seen_events) {
         seen_events = line_events;
+        applyLineChange();
         uint32_t baud = user_baud;
         if (baud != applied_baud) {
             Serial1.begin(baud);
@@ -115,6 +124,8 @@ void loop()
         while (Serial1.read() >= 0) {
         }
     }
+
+    dap_bridge_poll();
 
     // 只取 Serial1 发送 FIFO 放得下的量：write() 在 FIFO 满时等待，921600 下写 1 KB 约 11 ms，
     // 期间 RA4M1 发来的数据会积压到超出接收缓冲（实测双向同时 64 KB 丢约 1.4 KB）
