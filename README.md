@@ -12,7 +12,7 @@
 
 ## 构建与上传
 
-固件是 arduino-bl 平台上的 sketch `UNOR4USBBridgeBL/`，FQBN `bouffalolab:bl:unor4wifi_bl616cl`，需要含 HID 类的 `bl616cl-libs` 0.4.1。默认按 1V0 模组（MD GPIO14、SWCLK GPIO12、SWDIO GPIO13）；1V1 映射为 MD GPIO10、SWCLK GPIO8、SWDIO GPIO9，需同时设置 `--build-property compiler.cpp.extra_flags=-DBRIDGE_MODULE_1V1` 与 `--build-property compiler.c.extra_flags=-DBRIDGE_MODULE_1V1`，目前未做 1V1 实板验证。
+固件是 arduino-bl 平台上的 sketch `UNOR4USBBridgeBL/`，FQBN `bouffalolab:bl:unor4wifi_bl616cl`，需要含 HID 与 external-host Controller 的 `bl616cl-libs` 0.5.0。默认按 1V0 模组（MD GPIO14、SWCLK GPIO12、SWDIO GPIO13）；1V1 映射为 MD GPIO10、SWCLK GPIO8、SWDIO GPIO9，需同时设置 `--build-property compiler.cpp.extra_flags=-DBRIDGE_MODULE_1V1` 与 `--build-property compiler.c.extra_flags=-DBRIDGE_MODULE_1V1`，目前未做 1V1 实板验证。
 
 ```sh
 arduino-cli compile -b bouffalolab:bl:unor4wifi_bl616cl --build-path <编译目录> UNOR4USBBridgeBL
@@ -52,7 +52,22 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 | 静态地址（WiFiS3 `config`、`setDNS`）：SETIP（地址、网关、掩码，可再带 1–2 个 DNS），调用平台 `WiFi.config`、`setDNS`；地址为 0.0.0.0 时恢复 DHCP，SOFTRESETWIFI 也恢复 DHCP（同上游）。WiFiS3 的 `config` 先发 SOFTAPCONFIG 设置 AP 地址，再发 SETIP 设置 STA 地址 | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3（renesas 1.6.0）：与平台相同的一组检查全部通过（连接前与已连接时设静态地址、断开重连、`setDNS`、恢复 DHCP、DHCP 下 `setDNS` 转为静态地址；ping 网关、DNS 解析、与电脑 TCP 回显、电脑 ping 板子）。主机对接测试覆盖已连接时生效、两个 DNS、重连保持、`config(地址)` 的默认值、参数不足与不合法地址、恢复 DHCP、SOFTRESETWIFI |
 | AP（WiFiS3 `beginAP`、`softAPIP`、`softAPSSID`）：BEGINSOFTAP（SSID、密码、可选信道）、SOFTAPCONFIG、IPSOFTAP、GETSOFTAPSSID、MACSOFTAP；WIFIMODE=2 切换到 AP，WIFIMODE=1 / `begin` 回 STA；AP 与 STA 不并行 | experimental | 主机对接测试：78/78；红测 78 项中 8 项 AP 相关失败，合入后全绿。首块板（1V0）：run-ap-2 全套 34/34；电脑连入取得 DHCP 地址、状态 8、ping 应答，TCP/UDP 回显正常，SOFTRESETWIFI 停止 AP；AP→STA 的 `begin` 路径在平台实板与 bridge 主机测试中通过，bridge 实板尚未覆盖。证据见工作区 [AP 验证记录](../.tasks/2026-10-21-arduino-bl-platform/subtasks/ST008-bridge-features/work/2026-10-26-ap.txt) |
 | `AT+FWVERSION_U32`（WiFiS3 `firmwareVersionU32()`）：版本三段各一个原始字节再加 0（同上游），WiFiS3 取前 3 字节；某段为 10、13、32 或 124 时 WiFiS3 的解析会出错（上游相同，本固件为 0.1.0） | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3：读到 0x000100，连读两次相同。主机对接测试覆盖 |
-| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、HOSTNAME、时间、文件系统、OTA、BLE | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
+| BLE HCI over AT（HCIBEGIN、HCIEND、HCIWAIT、HCIAVAILABLE、HCIREAD、HCIWRITE） | experimental | Linux + BL616CL 1V0、libs 0.5.0、真实 RA4M1 使用未修改 ArduinoBLE 2.1.0：7 个官方示例通过；central/peripheral 各 3 次连接、60 轮 GATT 读写/通知；STA/TCP 与 BLE/USB 60 轮并发及 10 轮 BLE 启停通过。BL 仅运行 Controller；公共地址、RAM 密钥的数字比较/拒绝/超时/加密读写通知与密钥重连已实测；RPA、密钥持久化与长稳未验收，见下文及 ARDUINO-44 记录 |
+| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、HOSTNAME、时间、文件系统、OTA | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
+
+## BLE 使用边界
+
+依赖固定 ArduinoBLE 2.1.0、Renesas core 1.6.0 和 libs 0.5.0。HCIREAD 每次最多 257 字节；HCIAVAILABLE 提供有限窗口，在完整 H4 包之后返回一次 0，让 poll 返回并避免 ArduinoBLE 的共用接收缓冲覆盖命令结果。HCIBEGIN 开始新 Host 会话；截断 HCIWRITE 失败会关闭 Controller，须重新 HCIBEGIN。请求和应答详见 [HCI AT 合同](../docs/reference/wifis3-at-protocol.md#ble-hci-over-at2026-10-27)。
+
+ArduinoBLE 此版本的 AT transport `end()` 为空，释放 Controller 需通过 WiFiS3 modem 发 HCIEND；其 `wait()` 存在命令格式错误，带超时的 `BLE.poll(timeout)` 未验收。普通轮询路径已实测。Jira 提到的 HCIBUFFERALLOC 在固定官方 bridge/ArduinoBLE/WiFiS3 中不存在，本固件明确回 ERROR。
+
+真实对端为 Intel AX200：官方 central 三例用 Bumble Host 直接驱动实体射频，peripheral 四例用 BlueZ/Bleak；均非模拟 HCI。BlueZ/Linux 对端曾先收到 ACL、后收到连接事件并丢首包；自定义 central 的 BlueZ 用例连接后等 250 ms，通过 3 连接/60 轮。官方例程和 ArduinoBLE 库均未修改。完整记录见 [ARDUINO-44](../.tasks/2026-10-27-arduino-44-ble-hci-arduino-ble/STATUS.md)。
+
+配对实测使用自定义 RA4M1 安全探针和实体 AX200/Bumble，ArduinoBLE 库保持未修改：未加密访问返回 ATT 0x0F；数字比较接受/拒绝、8 秒确认超时、30 秒配对窗口到期、10 轮加密读写/通知、关闭新配对后的已有密钥重连通过。密钥仅留 RAM，不记录密钥或确认码。此测试采用公共地址；未验证 RPA 或掉电后的密钥恢复。负例与正例之间复位 RA4M1：该库可能跨连接保留受保护读取的延迟响应；不宣称覆盖这条连续恢复路径。
+
+当前硬件未验收其余五个官方示例：LedControl、ButtonLED 缺按钮接线，BatteryMonitor 缺确定 A0 输入，EncryptedBatteryMonitor 还需板型/安全适配，SensorTagButton 缺 TI SensorTag 实物。12 例编译通过仅为软件辅助检查。
+
+本轮 0.5.0 包额外通过 AP 回归：信道 1/6 在 BLE 开启前、开启中、关闭后均可被真实扫描发现；信道 6 下电脑连入、DHCP、3 次 ping、60 轮 TCP/UDP/BLE/USB 并发及 10 次 BLE 启停后 TCP 保持通过。此前扫描脚本未等待 NetworkManager 的 LastScan 更新，得到“未看到 AP”；加入扫描完成检查后通过，旧失败及修改前 bridge 对照日志保留，不能据此宣称 bridge 曾出现 AP 回归。
 
 ## SWD 调试与编程
 
@@ -81,7 +96,7 @@ pyocd commander -u <USB序列号> -t r7fa4m1ab -f 100000 \
 
 运行中的 bridge 可执行 `python3 tests/dap_hid_check.py /dev/hidrawN`，核对设备身份、能力/包长、错误命令、非法时钟、连续请求和 Feature 版本，共 110 项；不改写目标内存。SWD 编程、调试和 USB/串口组合实板记录在工作区 [ARDUINO-42 任务](../.tasks/2026-10-26-arduino-42-usb-dap/STATUS.md)。
 
-`tests/at_host/run.py` 在电脑上做 AT 对接测试：RA4M1 侧是未修改的 WiFiS3（直接编译已安装的 `arduino:renesas_uno` 包里的源码），BL616CL 侧是本仓库的 AT 服务端加 arduino-bl 的 WiFi 库，其中 Wi-Fi 换成虚拟 AP、socket 换成本机 socket；两个程序经 socketpair 相连，逐项核对扫描、联网、地址查询、DNS、ping、TCP 收发、UDP 收发、TCP 服务端、TLS 客户端、静态地址、AP 与 STA/AP 切换、固件版本、socket 上限、错误应答与 RESTARTBOOTLOADER，共 78 项；UDP 对端是本脚本在 127.0.0.1 起的 UDP 回显服务，TCP 服务端的对端是本脚本中的客户端线程；TLS 换成不加密的替身（`tests/at_host/bl/fake_tls_port.c`），只核对命令把主机名、证书参数与数据交给平台，不检验加密与证书校验。需要 `g++`、`python3`，arduino-bl 默认取本仓库旁边的目录（`--platform` 可改）：
+`tests/at_host/run.py` 在电脑上做 AT 对接测试：RA4M1 侧是未修改的 WiFiS3（直接编译已安装的 `arduino:renesas_uno` 包里的源码），BL616CL 侧是本仓库的 AT 服务端加 arduino-bl 的 WiFi 库，其中 Wi-Fi 换成虚拟 AP、socket 换成本机 socket；两个程序经 socketpair 相连，逐项核对扫描、联网、地址查询、DNS、ping、TCP 收发、UDP 收发、TCP 服务端、TLS 客户端、静态地址、AP 与 STA/AP 切换、固件版本、socket 上限、错误应答与 RESTARTBOOTLOADER，共 78 项；UDP 对端是本脚本在 127.0.0.1 起的 UDP 回显服务，TCP 服务端的对端是本脚本中的客户端线程；BLEController 替身固定不可用，不检验 BLE；TLS 换成不加密的替身（`tests/at_host/bl/fake_tls_port.c`），只核对命令把主机名、证书参数与数据交给平台，不检验加密与证书校验。需要 `g++`、`python3`，arduino-bl 默认取本仓库旁边的目录（`--platform` 可改）：
 
 ```sh
 python3 tests/at_host/run.py --renesas <arduino 数据目录>/packages/arduino/hardware/renesas_uno/1.6.0

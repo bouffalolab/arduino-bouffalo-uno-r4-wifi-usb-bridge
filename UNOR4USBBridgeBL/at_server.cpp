@@ -5,6 +5,7 @@
 
 #include "WiFi.h"
 #include "at_server.h"
+#include <BLEController.h>
 
 #include "bridge_version.h"
 #define FW_VERSION         BRIDGE_VERSION_STRING /* 本固件版本，AT+FWVERSION 返回 */
@@ -39,6 +40,11 @@ static bool server_allocated[MAX_SERVERS];
 static WiFiSSLClient ssls[MAX_SSL];
 static bool ssl_allocated[MAX_SSL];
 static char *ssl_ca[MAX_SSL]; /* SETCAROOT 给的 PEM（'\0' 结尾）；为空时用根证书束 */
+static bool hci_started;
+static size_t hci_visible;
+static bool hci_batch_done;
+static uint8_t hci_header[5];
+static size_t hci_header_used, hci_header_size, hci_payload_left;
 /* 服务端接入的连接，编号 SERVER_SOCK_BASE + i；server 为 -1 表示空位。accepted 为假的由 SERVERAVAILABLE 收下，
    SERVERWRITE 发给它们（同上游）；为真的由 SERVERACCEPT 交给主机 */
 static struct {
@@ -235,6 +241,159 @@ static void cmd_softreset(Stream &io, const char *name, char op, char *args)
     }
     WiFi.config(IPAddress(0, 0, 0, 0)); /* 恢复 DHCP，同上游 */
     wifi_mode = 0;
+}
+
+static void cmd_hcibegin(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op != '\0') {
+        reply_error(io, name);
+        return;
+    }
+    // A new RA4M1 sketch may start while the previous Host was still scanning.
+    // Start a new H4 session instead of inheriting queued events and partial frames.
+    BLEController.end();
+    hci_started = false;
+    if (!BLEController.begin()) {
+        reply_error(io, name);
+        return;
+    }
+    hci_started = true;
+    hci_visible = 0;
+    hci_batch_done = false;
+    hci_header_used = hci_header_size = hci_payload_left = 0;
+    reply(io, name, "");
+}
+
+static void cmd_hciwait(Stream &io, const char *name, char op, char *args)
+{
+    long timeout;
+    if (!hci_started || op != '=' || !parse_long(args, &timeout) || timeout < 0) {
+        reply_error(io, name);
+        return;
+    }
+    unsigned long start = millis();
+    while (BLEController.available() == 0 && millis() - start < (unsigned long)timeout) {
+        delay(1);
+    }
+    reply(io, name, "");
+}
+
+static void cmd_hciend(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op != '\0') {
+        reply_error(io, name);
+        return;
+    }
+    BLEController.end();
+    hci_started = false;
+    hci_visible = 0;
+    hci_batch_done = false;
+    hci_header_used = hci_header_size = hci_payload_left = 0;
+    reply(io, name, "");
+}
+
+static void cmd_hciavailable(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (!hci_started || op != '?') {
+        reply_error(io, name);
+        return;
+    }
+    // ArduinoBLE keeps Command Complete results in its shared receive buffer.
+    // Return zero after each H4 packet so the next packet cannot overwrite
+    // a result before sendCommand() returns to its caller.
+    if (hci_batch_done) {
+        hci_batch_done = false;
+        reply_int(io, name, 0);
+        return;
+    }
+    if (hci_visible == 0) hci_visible = BLEController.available();
+    reply_int(io, name, hci_visible);
+}
+
+static void cmd_hciread(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (!hci_started || op != '\0') {
+        reply_error(io, name);
+        return;
+    }
+    // ArduinoBLE 2.1.0 queues each reply in RingBufferN<258>, usable capacity 257.
+    if (hci_visible == 0) hci_visible = BLEController.available();
+    size_t n = 0, limit = min(hci_visible, (size_t)257);
+    bool packet_done = false;
+    while (n < limit) {
+        if (hci_header_size == 0 || hci_header_used < hci_header_size) {
+            int byte = BLEController.read();
+            if (byte < 0) break;
+            data[n++] = byte;
+            if (hci_header_used == 0) {
+                // Controller output used by ArduinoBLE is Event or ACL.
+                hci_header_size = byte == 4 ? 3 : byte == 2 ? 5 : 1;
+            }
+            hci_header[hci_header_used++] = byte;
+            if (hci_header_used < hci_header_size) continue;
+            hci_payload_left = hci_header[0] == 4 ? hci_header[2] :
+                               hci_header[0] == 2 ? hci_header[3] | (hci_header[4] << 8) : 0;
+        } else {
+            size_t got = BLEController.read(data + n, min(limit - n, hci_payload_left));
+            if (got == 0) break;
+            n += got;
+            hci_payload_left -= got;
+        }
+        if (hci_payload_left == 0) {
+            hci_header_used = hci_header_size = 0;
+            packet_done = true;
+            break;
+        }
+    }
+    hci_visible = packet_done ? 0 : hci_visible - n;
+    hci_batch_done = n > 0 && (packet_done || hci_visible == 0);
+    reply_data(io, name, n);
+}
+
+class HciSink : public Print {
+public:
+    size_t write(uint8_t byte) override
+    {
+        return write(&byte, 1);
+    }
+
+    size_t write(const uint8_t *buffer, size_t size) override
+    {
+        size_t sent = 0;
+        unsigned long start = millis();
+        while (sent < size && millis() - start < 5000) {
+            sent += BLEController.write(buffer + sent, size - sent);
+            if (sent < size) delay(1);
+        }
+        return sent;
+    }
+};
+
+/* AT+HCIWRITE=<n> 后紧跟 n 个 H4 字节；ArduinoBLE 的 passthrough 直接发送载荷。 */
+static void cmd_hciwrite(Stream &io, const char *name, char op, char *args)
+{
+    long left;
+    if (op != '=' || !parse_long(args, &left) || left <= 0) {
+        reply_error(io, name);
+        return;
+    }
+    HciSink sink;
+    if (read_payload(io, left, hci_started ? &sink : nullptr)) {
+        io.print("OK\r\n");
+    } else {
+        // A timed-out transaction may leave a partial H4 header in the Controller.
+        // Require HCIBEGIN again so the next Host cannot inherit that frame.
+        BLEController.end();
+        hci_started = false;
+        hci_visible = 0;
+        hci_batch_done = false;
+        hci_header_used = hci_header_size = hci_payload_left = 0;
+        reply_error(io, name);
+    }
 }
 
 static void cmd_fwversion(Stream &io, const char *name, char op, char *args)
@@ -1154,6 +1313,12 @@ static const struct {
     handler_t handler;
 } commands[] = {
     { "+SOFTRESETWIFI", cmd_softreset },
+    { "+HCIBEGIN", cmd_hcibegin },
+    { "+HCIEND", cmd_hciend },
+    { "+HCIWAIT", cmd_hciwait },
+    { "+HCIAVAILABLE", cmd_hciavailable },
+    { "+HCIREAD", cmd_hciread },
+    { "+HCIWRITE", cmd_hciwrite },
     { "+FWVERSION", cmd_fwversion },
     { "+FWVERSION_U32", cmd_fwversion_u32 },
     { "+WIFIMODE", cmd_wifimode },
