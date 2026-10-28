@@ -54,6 +54,7 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 | `AT+FWVERSION_U32`（WiFiS3 `firmwareVersionU32()`）：版本三段各一个原始字节再加 0（同上游），WiFiS3 取前 3 字节；某段为 10、13、32 或 124 时 WiFiS3 的解析会出错（上游相同，本固件为 0.1.0） | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3：读到 0x000100，连读两次相同。主机对接测试覆盖 |
 | BLE HCI over AT（HCIBEGIN、HCIEND、HCIWAIT、HCIAVAILABLE、HCIREAD、HCIWRITE） | experimental | Linux + BL616CL 1V0、libs 0.5.0、真实 RA4M1 使用未修改 ArduinoBLE 2.1.0：7 个官方示例通过；central/peripheral 各 3 次连接、60 轮 GATT 读写/通知；STA/TCP 与 BLE/USB 60 轮并发及 10 轮 BLE 启停通过。BL 仅运行 Controller；公共地址、RAM 密钥的数字比较/拒绝/超时/加密读写通知与密钥重连已实测；RPA、密钥持久化与长稳未验收，见下文及 ARDUINO-44 记录 |
 | 文件 AT（MOUNTFS、FS 的删除/覆盖/读取/追加），调用平台 LittleFS | experimental | BL616CL 1V0 + 真实 RA4M1、官方 WiFiS3 1.6.0：10009 字节二进制、1023 字节读取、分段/非法帧/超时、满盘报错及删除复用通过；限制见下文及 ARDUINO-47 记录 |
+| Preferences AT（九条 PREF 命令），调用平台 Preferences/LittleFS | experimental | 原版RA Modem类型往返、二进制、真实满盘/恢复及普通文件共存通过；见下文与ARDUINO-48 |
 | UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、HOSTNAME、时间、OTA | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
 
 ## 文件 AT 使用边界
@@ -62,7 +63,23 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 
 写/追加单帧 0–255 字节，读单帧最多 1023 字节；文件总大小受 FS 空闲容量限制。沿用公共缓冲，完整接收单帧后才操作 Flash，避免擦写期间 UART 载荷丢失；不在栈上缓存整文件。路径必须以 `/` 开头，拒绝 `..` 跳转；路径不能包含逗号、CRLF 或 NUL，整条 AT 行最多 256 字节。AT task 串行执行，不提供并发文件事务。有效写长度已解析时，失败也消费声明载荷；载荷间隔超过 1 秒则返回错误，主机须放弃旧载荷并开始新命令。失败覆盖/追加不保证回滚。
 
-`MOUNTFS=1` 仍只尝试挂载，失败不自动格式化；这与上游 format-on-fault 不同，用于保护已有数据。默认使用平台 416 KiB 独立 FS；普通同布局 Arduino 上传保留 FS，改变布局不承诺自动迁移。WiFiFileSystem 的 `readfile()` 把数据当 C 字符串打印，精确二进制读取需使用原 Modem 的长度模式；到达 EOF 返回错误以结束其读取循环。Preferences API 留待 ARDUINO-48，本轮不宣称已支持。
+`MOUNTFS=1` 仍只尝试挂载，失败不自动格式化；这与上游 format-on-fault 不同，用于保护已有数据。默认使用平台 416 KiB 独立 FS；普通同布局 Arduino 上传保留 FS，改变布局不承诺自动迁移。WiFiFileSystem 的 `readfile()` 把数据当 C 字符串打印，精确二进制读取需使用原 Modem 的长度模式；到达 EOF 返回错误以结束其读取循环。Preferences 的私有路径 `/.preferences` 及其子路径禁止文件 AT 操作；PREF 合同与限制见下文。
+
+## Preferences AT
+
+九条 `PREFBEGIN/END/CLEAR/REMOVE/PUT/GET/TYPE/LEN/STAT` 遵循固定上游线合同，
+通用存储实现在平台 `Preferences` library，bridge 只解析参数和收发原始载荷。
+RA4M1 的官方 WiFiS3 1.6.0 只有命令名，没有 Preferences 封装；本项目以其未修改的
+Modem 实测这些帧。命名空间/键各1–15字节，类型0–7为定长整数，8为字符串，9为BLOB，
+单值最多1023字节。完整接收后才写 Flash；错误回 `+PREFx:ERROR\r\n`。
+`PREFSTAT` 是当前 namespace 剩余逻辑键槽（64-count），与上游NVS全分区统计不同，
+不能据此保证物理剩余空间。值提交失败返回0；空字符串成功也返回0，需按类型读取确认。
+默认/空/lfs partition可用，其他partition拒绝；挂载/格式错误不自动format。
+文件与Preferences共享416KiB容量，原子替换需临时空间，没有预留配额。
+功能状态 experimental；真实RA原Modem全类型/1023字节往返和满盘错误/恢复通过。
+满盘后PREF新增在未达64槽时返回0，旧键/其他namespace/普通文件保持。
+挂载故障的6条真实RA帧均明确失败且完整416KiB FS读回未变，未自动格式化。
+验收及实机/辅助证据分别记录于ARDUINO-48任务。
 
 ## BLE 使用边界
 
@@ -116,3 +133,7 @@ python3 tests/at_host/run.py --renesas <arduino 数据目录>/packages/arduino/h
 文件命令另有 `python3 tests/at_host/file_check.py <上述编译目录>/bl_host`：32 项软件/fake 检查，存储由 POSIX 文件替代，注入写入、提交及挂载失败；不运行真实 littlefs 或 Flash，不计入实机通过项。真实 RA4M1、固件身份、原始失败/修正和恢复证据见工作区 [ARDUINO-47](../.tasks/2026-10-28-arduino-47-file-at/STATUS.md)。
 
 AT 协议与命令子集见 [WiFiS3 AT 协议](../docs/reference/wifis3-at-protocol.md)。`AT+FWVERSION` 返回本固件版本 0.1.0，WiFiS3 示例按字符串与 0.6.0 比较后会打印升级提示，不影响使用。`AT+BEGINSTA` 把第一个逗号之后的内容都当作密码（含逗号的密码经主机测试验证）。
+
+Preferences 命令辅助检查：`python3 tests/at_host/pref_check.py <编译目录>/bl_host`。
+172 项软件/fake，使用 POSIX 存储并注入写入/close/rename/挂载失败，不运行真实 littlefs/Flash；
+实机溢出失败与修复后回归分别留证于 [ARDUINO-48](../.tasks/2026-10-28-arduino-48-preferences/STATUS.md)。

@@ -86,9 +86,11 @@ def build(args, out):
     bl_src = common + [os.path.join(HERE, "bl", f) for f in ("bl_main.cpp", "fake_wifi_port.c", "fake_net_port.c",
                                                               "fake_tls_port.c")]
     bl_src += [os.path.join(BRIDGE, "UNOR4USBBridgeBL/at_server.cpp")]
+    preferences = os.path.join(args.platform, "libraries/Preferences/src")
+    bl_src += [os.path.join(preferences, "Preferences.cpp")]
     bl_src += [os.path.join(wifi, f) for f in ("WiFi.cpp", "WiFiClient.cpp", "WiFiSSLClient.cpp", "WiFiServer.cpp",
                                                   "WiFiUdp.cpp")]
-    bl_inc = [host, os.path.join(HERE, "bl"), wifi, os.path.join(BRIDGE, "UNOR4USBBridgeBL"), api]
+    bl_inc = [host, os.path.join(HERE, "bl"), wifi, os.path.join(BRIDGE, "UNOR4USBBridgeBL"), api, preferences]
     bl_out = os.path.join(out, "bl")
     os.makedirs(bl_out, exist_ok=True)
     bl = os.path.join(out, "bl_host")

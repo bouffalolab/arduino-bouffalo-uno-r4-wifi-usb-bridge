@@ -2,11 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "WiFi.h"
 #include "at_server.h"
 #include <BLEController.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 
 #include "bridge_version.h"
 #define FW_VERSION         BRIDGE_VERSION_STRING /* 本固件版本，AT+FWVERSION 返回 */
@@ -42,6 +44,7 @@ static WiFiSSLClient ssls[MAX_SSL];
 static bool ssl_allocated[MAX_SSL];
 static char *ssl_ca[MAX_SSL]; /* SETCAROOT 给的 PEM（'\0' 结尾）；为空时用根证书束 */
 static bool hci_started;
+static Preferences preferences;
 static size_t hci_visible;
 static bool hci_batch_done;
 static uint8_t hci_header[5];
@@ -1306,6 +1309,148 @@ static void cmd_mountfs(Stream &io, const char *name, char op, char *args)
     reply(io, name, "FS Mounted\r\n");
 }
 
+/* PREF 数字结果按固定上游保留额外空行；数值0是begin/写/删/clear的失败结果。 */
+static void pref_number(Stream &io, const char *name, uint64_t value)
+{
+    char result[24];
+    snprintf(result, sizeof(result), "%" PRIu64 "\r\n", value);
+    reply(io, name, result);
+}
+
+static bool pref_name(const char *key) { return key && *key && strlen(key) <= 15; }
+static bool pref_default_error() {
+    int e = preferences.lastError();
+    return e == 0 || e == LFS_ERR_NOENT || e == LFS_ERR_INVAL;
+}
+
+static void cmd_prefbegin(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[4]; long readOnly;
+    int argc = split(args, argv, 4);
+    if (op != '=' || argc != 3 || !parse_long(argv[1], &readOnly) || (readOnly != 0 && readOnly != 1)) {
+        reply_error(io, name); return;
+    }
+    preferences.end();
+    pref_number(io, name, preferences.begin(argv[0], readOnly, argv[2]));
+}
+
+static void cmd_prefcontrol(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op != 0) { reply_error(io, name); return; }
+    if (!strcmp(name, "+PREFEND")) { preferences.end(); reply(io, name, "0"); return; }
+    if (!strcmp(name, "+PREFCLEAR")) { pref_number(io, name, preferences.clear()); return; }
+    size_t n = preferences.freeEntries();
+    if (preferences.lastError()) reply_error(io, name);
+    else pref_number(io, name, n);
+}
+
+static void cmd_prefkey(Stream &io, const char *name, char op, char *args)
+{
+    if (op != '=' || !pref_name(args) || strchr(args, ',')) { reply_error(io, name); return; }
+    if (!strcmp(name, "+PREFREMOVE")) { pref_number(io, name, preferences.remove(args)); return; }
+    size_t value = !strcmp(name, "+PREFTYPE") ? preferences.getType(args) : preferences.getBytesLength(args);
+    if (!pref_default_error()) reply_error(io, name);
+    else pref_number(io, name, value);
+}
+
+static bool pref_integer(const char *text, long type, int64_t &signedValue, uint64_t &unsignedValue)
+{
+    bool negative = *text == '-';
+    if (*text == '+' || negative) ++text;
+    if (!*text || ((type & 1) && negative)) return false;
+    unsigned bits = (1u << (type / 2)) * 8;
+    uint64_t limit = (type & 1) ? UINT64_MAX >> (64 - bits) :
+        (uint64_t(1) << (bits - 1)) - !negative;
+    uint64_t value = 0;
+    for (; *text; ++text) {
+        if (*text < '0' || *text > '9') return false;
+        unsigned digit = *text - '0';
+        if (value > (limit - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    unsignedValue = value;
+    if (!(type & 1)) signedValue = negative ?
+        (value == (uint64_t(1) << 63) ? INT64_MIN : -int64_t(value)) : int64_t(value);
+    return true;
+}
+
+static void cmd_prefput(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[4]; long type;
+    int argc = split(args, argv, 4);
+    if (op != '=' || argc < 3 || !parse_long(argv[1], &type)) { reply_error(io, name); return; }
+    if (type == PT_STR || type == PT_BLOB) {
+        long length;
+        if (!parse_long(argv[2], &length) || length < 0) { reply_error(io, name); return; }
+        if (argc != 3 || !pref_name(argv[0]) || length > (long)Preferences::MAX_VALUE_SIZE) {
+            read_payload(io, length, nullptr); reply_error(io, name); return;
+        }
+        if (io.readBytes(data, length) != (size_t)length ||
+            (type == PT_STR && memchr(data, 0, length)) || (type == PT_BLOB && !length)) {
+            reply_error(io, name); return;
+        }
+        data[length] = 0;
+        size_t n = type == PT_STR ? preferences.putString(argv[0], reinterpret_cast<const char *>(data)) :
+                                   preferences.putBytes(argv[0], data, length);
+        pref_number(io, name, n); return;
+    }
+    int64_t s = 0; uint64_t u = 0;
+    if (argc != 3 || !pref_name(argv[0]) || type < 0 || type >= PT_STR || !pref_integer(argv[2], type, s, u)) {
+        reply_error(io, name); return;
+    }
+    size_t n = 0;
+    switch (type) {
+        case PT_I8: n = preferences.putChar(argv[0], s); break;
+        case PT_U8: n = preferences.putUChar(argv[0], u); break;
+        case PT_I16: n = preferences.putShort(argv[0], s); break;
+        case PT_U16: n = preferences.putUShort(argv[0], u); break;
+        case PT_I32: n = preferences.putInt(argv[0], s); break;
+        case PT_U32: n = preferences.putUInt(argv[0], u); break;
+        case PT_I64: n = preferences.putLong64(argv[0], s); break;
+        case PT_U64: n = preferences.putULong64(argv[0], u); break;
+    }
+    pref_number(io, name, n);
+}
+
+static void cmd_prefget(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[4]; long type;
+    int argc = split(args, argv, 4);
+    if (op != '=' || argc < 2 || !pref_name(argv[0]) || !parse_long(argv[1], &type) ||
+        type < 0 || type >= PT_INVALID || argc != (type == PT_BLOB ? 2 : 3)) {
+        reply_error(io, name); return;
+    }
+    if (type == PT_STR || type == PT_BLOB) {
+        size_t n;
+        if (type == PT_STR) {
+            String result = preferences.getString(argv[0], argv[2]);
+            n = result.length(); memcpy(data, result.c_str(), n);
+        } else {
+            n = preferences.getBytesLength(argv[0]);
+            if (n && preferences.getBytes(argv[0], data, sizeof(data)) != n) { reply_error(io, name); return; }
+        }
+        if (!pref_default_error()) { reply_error(io, name); return; }
+        io.print(name); io.print(": "); io.print(n); io.print('|'); io.write(data, n); io.print("\r\nOK\r\n");
+        return;
+    }
+    int64_t s = 0; uint64_t u = 0;
+    if (!pref_integer(argv[2], type, s, u)) { reply_error(io, name); return; }
+    switch (type) {
+        case PT_I8: s = preferences.getChar(argv[0], s); break;
+        case PT_U8: u = preferences.getUChar(argv[0], u); break;
+        case PT_I16: s = preferences.getShort(argv[0], s); break;
+        case PT_U16: u = preferences.getUShort(argv[0], u); break;
+        case PT_I32: s = preferences.getInt(argv[0], s); break;
+        case PT_U32: u = preferences.getUInt(argv[0], u); break;
+        case PT_I64: s = preferences.getLong64(argv[0], s); break;
+        case PT_U64: u = preferences.getULong64(argv[0], u); break;
+    }
+    if (!pref_default_error()) { reply_error(io, name); return; }
+    if (type & 1) pref_number(io, name, u);
+    else { char result[24]; snprintf(result, sizeof(result), "%" PRId64 "\r\n", s); reply(io, name, result); }
+}
+
 /* 官方 FS=0,op,path[,size|,offset,length]。写帧即使失败也消费已声明的载荷。 */
 static void cmd_fs(Stream &io, const char *name, char op, char *args)
 {
@@ -1320,7 +1465,8 @@ static void cmd_fs(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    bool local = parse_long(argv[0], &type) && type == 0 && LittleFS.mounted();
+    bool local = argc >= 3 && parse_long(argv[0], &type) && type == 0 && LittleFS.mounted() &&
+                 !Preferences::isStoragePath(argv[2]);
     if (action == 1 || action == 3) {
         if (argc < 4 || !parse_long(argv[3], &length) || length < 0) {
             reply_error(io, name);
@@ -1392,6 +1538,15 @@ static const struct {
     const char *name;
     handler_t handler;
 } commands[] = {
+    { "+PREFBEGIN", cmd_prefbegin },
+    { "+PREFEND", cmd_prefcontrol },
+    { "+PREFCLEAR", cmd_prefcontrol },
+    { "+PREFSTAT", cmd_prefcontrol },
+    { "+PREFREMOVE", cmd_prefkey },
+    { "+PREFTYPE", cmd_prefkey },
+    { "+PREFLEN", cmd_prefkey },
+    { "+PREFPUT", cmd_prefput },
+    { "+PREFGET", cmd_prefget },
     { "+MOUNTFS", cmd_mountfs },
     { "+FS", cmd_fs },
     { "+SOFTRESETWIFI", cmd_softreset },
