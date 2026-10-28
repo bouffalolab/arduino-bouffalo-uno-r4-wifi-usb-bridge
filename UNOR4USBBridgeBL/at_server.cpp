@@ -6,6 +6,7 @@
 #include "WiFi.h"
 #include "at_server.h"
 #include <BLEController.h>
+#include <LittleFS.h>
 
 #include "bridge_version.h"
 #define FW_VERSION         BRIDGE_VERSION_STRING /* 本固件版本，AT+FWVERSION 返回 */
@@ -1294,6 +1295,85 @@ static void cmd_udpstop(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/* 保留官方 MOUNTFS 形式；本平台挂载失败不自动格式化，包括 format_on_fault=1。 */
+static void cmd_mountfs(Stream &io, const char *name, char op, char *args)
+{
+    long flag;
+    if (op != '=' || !parse_long(args, &flag) || (flag != 0 && flag != 1) || !LittleFS.begin()) {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, "FS Mounted\r\n");
+}
+
+/* 官方 FS=0,op,path[,size|,offset,length]。写帧即使失败也消费已声明的载荷。 */
+static void cmd_fs(Stream &io, const char *name, char op, char *args)
+{
+    if (op != '=') {
+        reply_error(io, name);
+        return;
+    }
+    char *argv[6];
+    int argc = split(args, argv, 6);
+    long type, action, length;
+    if (argc < 2 || !parse_long(argv[1], &action)) {
+        reply_error(io, name);
+        return;
+    }
+    bool local = parse_long(argv[0], &type) && type == 0 && LittleFS.mounted();
+    if (action == 1 || action == 3) {
+        if (argc < 4 || !parse_long(argv[3], &length) || length < 0) {
+            reply_error(io, name);
+            return;
+        }
+        if (!local || argc != 4 || length > 255) {
+            read_payload(io, length, nullptr);
+            reply_error(io, name);
+            return;
+        }
+        /* Flash 操作会暂时屏蔽中断；先收完整帧，避免写入时丢失仍在传输的 UART 载荷。 */
+        if (io.readBytes(data, length) != (size_t)length) {
+            reply_error(io, name);
+            return;
+        }
+        File file = LittleFS.open(argv[2], action == 1 ? "w" : "a");
+        bool written = file && file.write(data, length) == (size_t)length;
+        bool committed = file && file.close();
+        if (written && committed) io.print("OK\r\n");
+        else reply_error(io, name);
+        return;
+    }
+    if (local && action == 0 && argc == 3) {
+        if (LittleFS.remove(argv[2])) io.print("OK\r\n");
+        else reply_error(io, name);
+        return;
+    }
+    long offset;
+    if (!local || action != 2 || argc != 5 || !parse_long(argv[3], &offset) ||
+        offset < 0 || offset > 0x7fffffffL || !parse_long(argv[4], &length) ||
+        length < 0 || length > RECV_MAX) {
+        reply_error(io, name);
+        return;
+    }
+    File file = LittleFS.open(argv[2]);
+    if (!file || (size_t)offset >= file.size() || !file.seek(offset)) {
+        reply_error(io, name);
+        return;
+    }
+    int n = file.read(data, min((size_t)length, file.size() - offset));
+    bool closed = file.close();
+    if (n < 0 || !closed) {
+        reply_error(io, name);
+        return;
+    }
+    io.print(name);
+    io.print(": ");
+    io.print(n);
+    io.print('|');
+    io.write(data, n);
+    io.print("\r\nOK\r\n");
+}
+
 /* AT+RESTARTBOOTLOADER：BL616CL 复位进 ROM 下载模式，供更新本固件。上游直接复位、不应答，主机要等满超时；
    这里先回 OK 并等它发完 */
 static void cmd_restartbootloader(Stream &io, const char *name, char op, char *args)
@@ -1312,6 +1392,8 @@ static const struct {
     const char *name;
     handler_t handler;
 } commands[] = {
+    { "+MOUNTFS", cmd_mountfs },
+    { "+FS", cmd_fs },
     { "+SOFTRESETWIFI", cmd_softreset },
     { "+HCIBEGIN", cmd_hcibegin },
     { "+HCIEND", cmd_hciend },

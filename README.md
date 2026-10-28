@@ -12,7 +12,7 @@
 
 ## 构建与上传
 
-固件是 arduino-bl 平台上的 sketch `UNOR4USBBridgeBL/`，FQBN `bouffalolab:bl:unor4wifi_bl616cl`，需要含 HID 与 external-host Controller 的 `bl616cl-libs` 0.5.0。默认按 1V0 模组（MD GPIO14、SWCLK GPIO12、SWDIO GPIO13）；1V1 映射为 MD GPIO10、SWCLK GPIO8、SWDIO GPIO9，需同时设置 `--build-property compiler.cpp.extra_flags=-DBRIDGE_MODULE_1V1` 与 `--build-property compiler.c.extra_flags=-DBRIDGE_MODULE_1V1`，目前未做 1V1 实板验证。
+固件是 arduino-bl 平台上的 sketch `UNOR4USBBridgeBL/`，FQBN `bouffalolab:bl:unor4wifi_bl616cl`，需要含 HID、external-host Controller 与 littlefs 的 `bl616cl-libs` 0.6.0、`bl-flash-tools` 0.2.0 及配套平台。默认按 1V0 模组（MD GPIO14、SWCLK GPIO12、SWDIO GPIO13）；1V1 映射为 MD GPIO10、SWCLK GPIO8、SWDIO GPIO9，需同时设置 `--build-property compiler.cpp.extra_flags=-DBRIDGE_MODULE_1V1` 与 `--build-property compiler.c.extra_flags=-DBRIDGE_MODULE_1V1`，目前未做 1V1 实板验证。
 
 ```sh
 arduino-cli compile -b bouffalolab:bl:unor4wifi_bl616cl --build-path <编译目录> UNOR4USBBridgeBL
@@ -53,7 +53,16 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 | AP（WiFiS3 `beginAP`、`softAPIP`、`softAPSSID`）：BEGINSOFTAP（SSID、密码、可选信道）、SOFTAPCONFIG、IPSOFTAP、GETSOFTAPSSID、MACSOFTAP；WIFIMODE=2 切换到 AP，WIFIMODE=1 / `begin` 回 STA；AP 与 STA 不并行 | experimental | 主机对接测试：78/78；红测 78 项中 8 项 AP 相关失败，合入后全绿。首块板（1V0）：run-ap-2 全套 34/34；电脑连入取得 DHCP 地址、状态 8、ping 应答，TCP/UDP 回显正常，SOFTRESETWIFI 停止 AP；AP→STA 的 `begin` 路径在平台实板与 bridge 主机测试中通过，bridge 实板尚未覆盖。证据见工作区 [AP 验证记录](../.tasks/2026-10-21-arduino-bl-platform/subtasks/ST008-bridge-features/work/2026-10-26-ap.txt) |
 | `AT+FWVERSION_U32`（WiFiS3 `firmwareVersionU32()`）：版本三段各一个原始字节再加 0（同上游），WiFiS3 取前 3 字节；某段为 10、13、32 或 124 时 WiFiS3 的解析会出错（上游相同，本固件为 0.1.0） | experimental | 首块板（1V0），RA4M1 跑未修改的 WiFiS3：读到 0x000100，连读两次相同。主机对接测试覆盖 |
 | BLE HCI over AT（HCIBEGIN、HCIEND、HCIWAIT、HCIAVAILABLE、HCIREAD、HCIWRITE） | experimental | Linux + BL616CL 1V0、libs 0.5.0、真实 RA4M1 使用未修改 ArduinoBLE 2.1.0：7 个官方示例通过；central/peripheral 各 3 次连接、60 轮 GATT 读写/通知；STA/TCP 与 BLE/USB 60 轮并发及 10 轮 BLE 启停通过。BL 仅运行 Controller；公共地址、RAM 密钥的数字比较/拒绝/超时/加密读写通知与密钥重连已实测；RPA、密钥持久化与长稳未验收，见下文及 ARDUINO-44 记录 |
-| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、HOSTNAME、时间、文件系统、OTA | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
+| 文件 AT（MOUNTFS、FS 的删除/覆盖/读取/追加），调用平台 LittleFS | experimental | BL616CL 1V0 + 真实 RA4M1、官方 WiFiS3 1.6.0：10009 字节二进制、1023 字节读取、分段/非法帧/超时、满盘报错及删除复用通过；限制见下文及 ARDUINO-47 记录 |
+| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、HOSTNAME、时间、OTA | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
+
+## 文件 AT 使用边界
+
+先发送 `AT+MOUNTFS=0`（或 `WiFiFileSystem.mount(false)`）。`AT+FS=0,1,/path,n` 后紧跟 n 个原始字节，覆盖/创建；op=3 追加，op=0 删除，op=2 的参数为 `/path,offset,length`。成功写入/删除回裸 `OK\r\n`；读取回 `+FS: <实际长度>|<原始字节>\r\nOK\r\n`。EOF、缺失文件及非法操作明确回 `+FS:ERROR\r\n`，没有独立的 size/exists AT 命令。
+
+写/追加单帧 0–255 字节，读单帧最多 1023 字节；文件总大小受 FS 空闲容量限制。沿用公共缓冲，完整接收单帧后才操作 Flash，避免擦写期间 UART 载荷丢失；不在栈上缓存整文件。路径必须以 `/` 开头，拒绝 `..` 跳转；路径不能包含逗号、CRLF 或 NUL，整条 AT 行最多 256 字节。AT task 串行执行，不提供并发文件事务。有效写长度已解析时，失败也消费声明载荷；载荷间隔超过 1 秒则返回错误，主机须放弃旧载荷并开始新命令。失败覆盖/追加不保证回滚。
+
+`MOUNTFS=1` 仍只尝试挂载，失败不自动格式化；这与上游 format-on-fault 不同，用于保护已有数据。默认使用平台 416 KiB 独立 FS；普通同布局 Arduino 上传保留 FS，改变布局不承诺自动迁移。WiFiFileSystem 的 `readfile()` 把数据当 C 字符串打印，精确二进制读取需使用原 Modem 的长度模式；到达 EOF 返回错误以结束其读取循环。Preferences API 留待 ARDUINO-48，本轮不宣称已支持。
 
 ## BLE 使用边界
 
@@ -103,5 +112,7 @@ python3 tests/at_host/run.py --renesas <arduino 数据目录>/packages/arduino/h
 ```
 
 设环境变量 `AT_HOST_TRACE=1` 时，BL 侧把串口上的原始收发写到 `bl_host.stderr`。主机测试不代替实板结果。
+
+文件命令另有 `python3 tests/at_host/file_check.py <上述编译目录>/bl_host`：32 项软件/fake 检查，存储由 POSIX 文件替代，注入写入、提交及挂载失败；不运行真实 littlefs 或 Flash，不计入实机通过项。真实 RA4M1、固件身份、原始失败/修正和恢复证据见工作区 [ARDUINO-47](../.tasks/2026-10-28-arduino-47-file-at/STATUS.md)。
 
 AT 协议与命令子集见 [WiFiS3 AT 协议](../docs/reference/wifis3-at-protocol.md)。`AT+FWVERSION` 返回本固件版本 0.1.0，WiFiS3 示例按字符串与 0.6.0 比较后会打印升级提示，不影响使用。`AT+BEGINSTA` 把第一个逗号之后的内容都当作密码（含逗号的密码经主机测试验证）。
