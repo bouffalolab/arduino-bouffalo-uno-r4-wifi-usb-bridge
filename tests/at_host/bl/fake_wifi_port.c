@@ -8,6 +8,7 @@
  */
 #include <arpa/inet.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -26,7 +27,8 @@ static uint16_t last_status;
 static uint32_t cfg_ip, cfg_mask, cfg_gw, cfg_dns[2]; /* 网络字节序；cfg_ip 为 0 时用 DHCP */
 static uint32_t dns_now[2];
 static bool ap_up, ap_failed;
-static uint32_t ap_ip, ap_mask;
+static uint32_t ap_ip, ap_mask, ap_gw, ap_cfg_ip, ap_cfg_mask, ap_cfg_gw;
+static bool auto_reconnect = true, ipv6;
 
 static void use_dhcp_dns(void)
 {
@@ -111,6 +113,30 @@ enum wifi_port_state wifi_port_state(void)
     return ap_failed ? WIFI_PORT_AP_FAILED : state;
 }
 
+/* Only interface/configuration plumbing is simulated here. No radio, ND,
+   reconnection or association-limit claim can be established by this fake. */
+enum wifi_port_state wifi_port_sta_state(void) { settle(); return state; }
+bool wifi_port_ap_running(void) { return ap_up; }
+int wifi_port_set_auto_reconnect(bool enable) { auto_reconnect = enable; return 0; }
+bool wifi_port_get_auto_reconnect(void) { return auto_reconnect; }
+int wifi_port_enable_ipv6(void) { ipv6 = true; return 0; }
+void wifi_port_ipv6(char *address, uint32_t size) { snprintf(address, size, "%s", ipv6 && wifi_port_sta_state() == WIFI_PORT_CONNECTED ? "fe80::1" : "::"); }
+void wifi_port_ap_ip(uint32_t *ip, uint32_t *mask, uint32_t *gw) {
+    *ip = ap_up ? ap_ip : 0; *mask = ap_up ? ap_mask : 0; *gw = ap_up ? ap_gw : 0;
+}
+int wifi_port_ap_config(uint32_t ip, uint32_t mask, uint32_t gw) {
+    if (ip && (mask != htonl(0xffffff00u) || (ntohl(ip) & 255) == 0 || (ntohl(ip) & 255) == 255)) return -1;
+    ap_cfg_ip = ip; ap_cfg_mask = mask; ap_cfg_gw = gw;
+    if (ap_up) { ap_ip = ip; ap_mask = mask; ap_gw = gw; }
+    return 0;
+}
+void wifi_port_sta_ip(uint32_t *ip, uint32_t *mask, uint32_t *gw) {
+    bool up = wifi_port_sta_state() == WIFI_PORT_CONNECTED;
+    *ip = !up ? 0 : cfg_ip ? cfg_ip : htonl(FAKE_IP);
+    *mask = !up ? 0 : cfg_ip ? cfg_mask : htonl(FAKE_MASK);
+    *gw = !up ? 0 : cfg_ip ? cfg_gw : htonl(FAKE_GW);
+}
+
 bool wifi_port_net_up(void)
 {
     enum wifi_port_state s = wifi_port_state();
@@ -136,7 +162,7 @@ void wifi_port_ip(uint32_t *ip, uint32_t *mask, uint32_t *gw)
         *mask = ap_mask;
         return;
     }
-    bool up = wifi_port_state() == WIFI_PORT_CONNECTED;
+    bool up = wifi_port_sta_state() == WIFI_PORT_CONNECTED;
     *ip = !up ? 0 : cfg_ip != 0 ? cfg_ip : htonl(FAKE_IP);
     *mask = !up ? 0 : cfg_ip != 0 ? cfg_mask : htonl(FAKE_MASK);
     *gw = !up ? 0 : cfg_ip != 0 ? cfg_gw : htonl(FAKE_GW);
@@ -149,7 +175,7 @@ void wifi_port_ip_config(uint32_t ip, uint32_t mask, uint32_t gw, uint32_t dns1,
     cfg_gw = gw;
     cfg_dns[0] = ip != 0 ? dns1 : 0;
     cfg_dns[1] = ip != 0 ? dns2 : 0;
-    if (wifi_port_state() == WIFI_PORT_CONNECTED) {
+    if (wifi_port_sta_state() == WIFI_PORT_CONNECTED) {
         if (ip != 0) {
             apply_static_dns();
         } else {
@@ -160,7 +186,7 @@ void wifi_port_ip_config(uint32_t ip, uint32_t mask, uint32_t gw, uint32_t dns1,
 
 void wifi_port_set_dns(uint32_t dns1, uint32_t dns2)
 {
-    bool up = wifi_port_state() == WIFI_PORT_CONNECTED;
+    bool up = wifi_port_sta_state() == WIFI_PORT_CONNECTED;
     if (cfg_ip == 0) {
         if (up) {
             uint32_t ip, mask, gw;
@@ -182,12 +208,12 @@ void wifi_port_set_dns(uint32_t dns1, uint32_t dns2)
 
 uint32_t wifi_port_dns(int index)
 {
-    return wifi_port_state() == WIFI_PORT_CONNECTED && index >= 0 && index < 2 ? dns_now[index] : 0;
+    return wifi_port_sta_state() == WIFI_PORT_CONNECTED && index >= 0 && index < 2 ? dns_now[index] : 0;
 }
 
 int32_t wifi_port_rssi(void)
 {
-    return wifi_port_state() == WIFI_PORT_CONNECTED ? FAKE_RSSI : 0;
+    return wifi_port_sta_state() == WIFI_PORT_CONNECTED ? FAKE_RSSI : 0;
 }
 
 int wifi_port_mac(uint8_t mac[6])
@@ -200,7 +226,7 @@ int wifi_port_mac(uint8_t mac[6])
 int wifi_port_bssid(uint8_t bssid[6])
 {
     static const uint8_t b[6] = FAKE_BSSID;
-    if (wifi_port_state() != WIFI_PORT_CONNECTED) {
+    if (wifi_port_sta_state() != WIFI_PORT_CONNECTED) {
         memset(bssid, 0, 6);
         return -1;
     }
@@ -239,8 +265,10 @@ int wifi_port_scan(struct wifi_port_ap *aps, int max, uint32_t timeout_ms)
     }
 }
 
-int wifi_port_ap_start(const char *ssid, const char *pass, uint8_t channel, uint32_t timeout_ms)
+int wifi_port_ap_start(const char *ssid, const char *pass, uint8_t channel, bool hidden, uint8_t max_connections, uint32_t timeout_ms)
 {
+    (void)hidden;
+    (void)max_connections;
     (void)pass;
     (void)channel;
     (void)timeout_ms;
@@ -250,8 +278,9 @@ int wifi_port_ap_start(const char *ssid, const char *pass, uint8_t channel, uint
         ap_failed = true;
         return -1;
     }
-    ap_ip = cfg_ip != 0 ? cfg_ip : htonl(0xC0A80401u);
-    ap_mask = cfg_ip != 0 ? cfg_mask : htonl(0xFFFFFF00u);
+    ap_ip = ap_cfg_ip != 0 ? ap_cfg_ip : htonl(0xC0A80401u);
+    ap_mask = ap_cfg_ip != 0 ? ap_cfg_mask : htonl(0xFFFFFF00u);
+    ap_gw = ap_cfg_ip != 0 ? ap_cfg_gw : ap_ip;
     ap_up = true;
     return 0;
 }

@@ -32,7 +32,6 @@ static bool line_overflow;
 /* CLIENTSEND、UDPWRITE 的分块，CLIENTRECEIVE、UDPREAD、WIFISCAN 的应答共用；UDPREAD 一次最多一个数据报 */
 static uint8_t data[WIFI_UDP_BUFFER_SIZE];
 
-static int wifi_mode;     /* AT+WIFIMODE：0 未设置，1 STA，2 AP */
 static bool wifi_started; /* 发起过 BEGINSTA 或 BEGINSOFTAP：Wi-Fi 协议栈已初始化，断开、停止 AP 才有意义 */
 static WiFiClient clients[MAX_SOCKETS];
 static bool allocated[MAX_SOCKETS];
@@ -244,7 +243,6 @@ static void cmd_softreset(Stream &io, const char *name, char op, char *args)
         WiFi.end(); /* 断开 STA、停止 AP，同上游 */
     }
     WiFi.config(IPAddress(0, 0, 0, 0)); /* 恢复 DHCP，同上游 */
-    wifi_mode = 0;
 }
 
 static void cmd_hcibegin(Stream &io, const char *name, char op, char *args)
@@ -426,27 +424,64 @@ static void cmd_fwversion_u32(Stream &io, const char *name, char op, char *args)
     io.print("\r\nOK\r\n");
 }
 
-static bool ap_running()
-{
-    uint8_t st = WiFi.status();
-    return st == WL_AP_LISTENING || st == WL_AP_CONNECTED;
-}
-
-/*
- * 1 STA、2 AP，同上游：切到 STA 时停止 AP（STA 不断开，WiFiS3 每次 begin 都先发 WIFIMODE=1），切到 AP 时断开 STA。
- * 0（关闭）与 3（STA 与 AP 同时运行）未实现
- */
+/* Mode and radio lifecycle belong to the platform WiFi library. */
 static void cmd_wifimode(Stream &io, const char *name, char op, char *args)
 {
     if (op == '?') {
-        reply_int(io, name, wifi_mode);
-    } else if (op == '=' && (strcmp(args, "1") == 0 || strcmp(args, "2") == 0)) {
-        wifi_mode = args[0] - '0';
-        if (wifi_mode == 1 && ap_running()) {
-            WiFi.end(); /* AP 运行时 STA 未连接，这里只停止 AP */
-        } else if (wifi_mode == 2 && wifi_started) {
-            WiFi.disconnect();
-        }
+        reply_int(io, name, WiFi.getMode());
+        return;
+    }
+    char *argv[2];
+    long mode, auto_connect;
+    int n = op == '=' ? split(args, argv, 2) : 0;
+    if (n < 1 || !parse_long(argv[0], &mode) || mode < 0 || mode > 3 ||
+        (n == 2 && argv[1][0] != '\0' && (!parse_long(argv[1], &auto_connect) || auto_connect < 0 || auto_connect > 1))) {
+        reply_error(io, name);
+        return;
+    }
+    /* Official ESP32 setAutoConnect is deprecated and returns false.
+       The optional second parameter has no effect, exactly as upstream. */
+    if (!WiFi.mode((WiFiMode)mode)) {
+        reply_error(io, name);
+        return;
+    }
+    wifi_started = true;
+    reply(io, name, "");
+}
+
+static void cmd_reconnect(Stream &io, const char *name, char op, char *args)
+{
+    long enable;
+    if (op == '?') {
+        reply_int(io, name, WiFi.getAutoReconnect());
+    } else if (op == '=' && parse_long(args, &enable) && enable >= 0 && enable <= 1 &&
+               WiFi.setAutoReconnect(enable != 0)) {
+        reply(io, name, "");
+    } else {
+        reply_error(io, name);
+    }
+}
+
+/* Explicit compatibility placeholder: the pinned official implementation also
+   ignores the setter and returns false from getAutoConnect. No Flash storage. */
+static void cmd_autoconnect(Stream &io, const char *name, char op, char *args)
+{
+    long enable;
+    if (op == '?') {
+        reply_int(io, name, 0);
+    } else if (op == '=' && parse_long(args, &enable) && enable >= 0 && enable <= 1) {
+        reply(io, name, "");
+    } else {
+        reply_error(io, name);
+    }
+}
+
+static void cmd_ipv6(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op == '?') {
+        reply(io, name, WiFi.localIPv6().c_str());
+    } else if (op == '\0' && WiFi.enableIpV6()) {
         reply(io, name, "");
     } else {
         reply_error(io, name);
@@ -493,9 +528,10 @@ static void cmd_ipsta(Stream &io, const char *name, char op, char *args)
         return;
     }
     switch (n) {
-        case 0: ip = WiFi.localIP(); break;
-        case 1: ip = WiFi.gatewayIP(); break;
-        case 2: ip = WiFi.subnetMask(); break;
+        case 0: ip = WiFi.stationIP(); break;
+        /* WiFiS3 also asks IPSTA for AP gateway/mask in mode 2. */
+        case 1: ip = WiFi.getMode() == WIFI_AP ? WiFi.gatewayIP() : WiFi.stationGatewayIP(); break;
+        case 2: ip = WiFi.getMode() == WIFI_AP ? WiFi.subnetMask() : WiFi.stationSubnetMask(); break;
         default: ip = WiFi.dnsIP(n - 3); break;
     }
     reply(io, name, ip.toString().c_str());
@@ -518,36 +554,33 @@ static void cmd_setip(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    WiFi.config(ip[0], ip[3], ip[1], ip[2]);
+    WiFi.configSTA(ip[0], ip[3], ip[1], ip[2]);
     if (n == 5 && ip[0] != IPAddress(0, 0, 0, 0)) {
         WiFi.setDNS(ip[3], ip[4]);
     }
     reply(io, name, "");
 }
 
-/*
- * AT+BEGINSOFTAP=<ssid>[,<密码>[,<信道>]]：应答 1（WL_AP_LISTENING）或 0，同上游；底层启动失败后 GETSTATUS 为 9，
- * 平台拒绝的参数（密码不足 8 个字符、信道不在 1–13）只回 0。空密码为开放网络。
- * 上游的第 4、5 个参数（隐藏 SSID、最大连接数，WiFiS3 不发）未实现，回 ERROR
- */
+/* Official defaults: open, channel 1, visible, max 5. The SDK has four
+   association slots; max 5 is a ceiling, not a promise of five-client capacity. */
 static void cmd_beginsoftap(Stream &io, const char *name, char op, char *args)
 {
-    char *argv[3];
-    long ch = 1;
-    int n = op == '=' ? split(args, argv, 3) : 0;
-    if (n == 0 || argv[0][0] == '\0' || (n == 3 && !parse_long(argv[2], &ch))) {
+    char *argv[5];
+    long ch = 1, hidden = 0, maximum = 5;
+    int n = op == '=' ? split(args, argv, 5) : 0;
+    if (n == 0 || argv[0][0] == '\0' ||
+        (n >= 3 && !parse_long(argv[2], &ch)) ||
+        (n >= 4 && (!parse_long(argv[3], &hidden) || hidden < 0 || hidden > 1)) ||
+        (n == 5 && !parse_long(argv[4], &maximum))) {
         reply_error(io, name);
         return;
     }
     wifi_started = true;
-    uint8_t st = WiFi.beginAP(argv[0], n > 1 ? argv[1] : "", ch >= 0 && ch <= 255 ? (uint8_t)ch : 0);
+    uint8_t st = WiFi.beginAP(argv[0], n > 1 ? argv[1] : "", ch >= 1 && ch <= 13 ? (uint8_t)ch : 0,
+                              hidden != 0, maximum >= 1 && maximum <= 5 ? (uint8_t)maximum : 0);
     reply(io, name, st == WL_AP_LISTENING ? "1" : "0");
 }
 
-/*
- * AT+SOFTAPCONFIG=<地址>,<网关>,<掩码>：AP 的地址与掩码。平台的 STA 与 AP 共用一套地址配置（同 WiFiNINA），这里按
- * config(地址, 网关, 网关, 掩码) 设置，也改 STA 的静态地址；WiFiS3 的 config 随后总会发 SETIP 设好 STA，结果与上游相同
- */
 static void cmd_softapconfig(Stream &io, const char *name, char op, char *args)
 {
     char *argv[3];
@@ -557,11 +590,21 @@ static void cmd_softapconfig(Stream &io, const char *name, char op, char *args)
     for (int i = 0; i < n && ok; i++) {
         ok = ip[i].fromString(argv[i]);
     }
-    if (!ok) {
+    if (!ok || !WiFi.softAPConfig(ip[0], ip[1], ip[2])) {
         reply_error(io, name);
         return;
     }
-    WiFi.config(ip[0], ip[1], ip[1], ip[2]);
+    reply(io, name, "");
+}
+
+static void cmd_disconnectsoftap(Stream &io, const char *name, char op, char *args)
+{
+    long wifi_off = 0;
+    if ((op != '\0' && (op != '=' || !parse_long(args, &wifi_off) || wifi_off < 0 || wifi_off > 1)) ||
+        !WiFi.softAPdisconnect(wifi_off != 0)) {
+        reply_error(io, name);
+        return;
+    }
     reply(io, name, "");
 }
 
@@ -681,13 +724,13 @@ static void cmd_wifiscan(Stream &io, const char *name, char op, char *args)
 
 static void cmd_disconnect(Stream &io, const char *name, char op, char *args)
 {
-    (void)args;
-    if (op != '\0') {
+    long wifi_off = 0;
+    if (op != '\0' && (op != '=' || !parse_long(args, &wifi_off) || wifi_off < 0 || wifi_off > 1)) {
         reply_error(io, name);
         return;
     }
     if (wifi_started) {
-        WiFi.disconnect();
+        WiFi.disconnect(wifi_off != 0);
     }
     reply(io, name, "");
 }
@@ -1567,7 +1610,10 @@ static const struct {
     { "+GETRSSI", cmd_getrssi },
     { "+GETBSSID", cmd_getbssid },
     { "+MACSTA", cmd_macsta },
-    /* AP：DISCONNECTSOFTAP（WiFiS3 不发）未实现，按未知命令回 ERROR */
+    { "+RECONNECT", cmd_reconnect },
+    { "+AUTOCONNECT", cmd_autoconnect },
+    { "+IPV6", cmd_ipv6 },
+    { "+DISCONNECTSOFTAP", cmd_disconnectsoftap },
     { "+BEGINSOFTAP", cmd_beginsoftap },
     { "+SOFTAPCONFIG", cmd_softapconfig },
     { "+IPSOFTAP", cmd_ipsoftap },

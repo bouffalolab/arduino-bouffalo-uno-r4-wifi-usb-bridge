@@ -400,7 +400,7 @@ def main():
     check("beginAP(ssid) 开放网络（%s）" % v("APOPEN"), n("APOPEN") == [7, 7])
     check("密码过短、信道 14：返回 WL_AP_FAILED，运行中的 AP 不受影响（%s）" % v("APBAD"), n("APBAD") == [9, 9, 7])
     check("底层启动失败：返回与状态为 WL_AP_FAILED（%s）" % v("APFAIL"), n("APFAIL") == [9, 9])
-    check("BEGINSOFTAP 带隐藏 SSID 参数、SOFTAPCONFIG 参数不足：ERROR（%s）" % v("APERR"), n("APERR") == [0, 0])
+    check("BEGINSOFTAP 接受隐藏 SSID 参数、SOFTAPCONFIG 参数不足被拒绝（%s）" % v("APERR"), n("APERR") == [1, 0])
     check("AP 运行时 begin：停止 AP，STA 用 DHCP 连上（%s）" % v("APTOSTA"),
           v("APTOSTA") == ["3", "3", "127.0.0.1", "0.0.0.0"])
     check("end（SOFTRESETWIFI）停止 AP（%s）" % v("APEND"), v("APEND") == ["7", "6", "0.0.0.0"])
