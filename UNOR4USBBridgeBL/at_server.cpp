@@ -20,9 +20,10 @@
 #define MAX_SSL            8       /* 同上游：SSLBEGINCLIENT 分配 2000–2007 */
 #define SSL_SOCK_BASE      2000
 #define CA_MAX             16384   /* SETCAROOT 的 PEM 上限 */
-#define CONNECT_TIMEOUT_MS 8000    /* WiFiS3 每条命令等 10 s，连接要在此之前应答 */
+#define CONNECT_TIMEOUT_MS 3000    /* WiFiS3 官方 CLIENTCONNECT 默认值 */
 #define PAYLOAD_TIMEOUT_MS 1000    /* CLIENTSEND 载荷两段之间的最长间隔 */
 #define RECV_MAX           1023    /* WiFiS3 每次 CLIENTRECEIVE 最多要 1023 字节 */
+#define TLS_SLOT_NAMESPACE  "tls-sse"
 
 typedef void (*handler_t)(Stream &io, const char *name, char op, char *args);
 
@@ -42,6 +43,8 @@ static bool server_allocated[MAX_SERVERS];
 static WiFiSSLClient ssls[MAX_SSL];
 static bool ssl_allocated[MAX_SSL];
 static char *ssl_ca[MAX_SSL]; /* SETCAROOT 给的 PEM（'\0' 结尾）；为空时用根证书束 */
+static char *ssl_cert[MAX_SSL];
+static char *ssl_key[MAX_SSL];
 static bool hci_started;
 static Preferences preferences;
 static size_t hci_visible;
@@ -169,6 +172,10 @@ static void close_socket(int s)
         ssl_allocated[s - SSL_SOCK_BASE] = false;
         free(ssl_ca[s - SSL_SOCK_BASE]);
         ssl_ca[s - SSL_SOCK_BASE] = nullptr;
+        free(ssl_cert[s - SSL_SOCK_BASE]);
+        ssl_cert[s - SSL_SOCK_BASE] = nullptr;
+        free(ssl_key[s - SSL_SOCK_BASE]);
+        ssl_key[s - SSL_SOCK_BASE] = nullptr;
     }
 }
 
@@ -817,9 +824,14 @@ static void connect_socket(Stream &io, const char *name, char **argv, long timeo
         return;
     }
     if (s >= SSL_SOCK_BASE) {
-        ssls[s - SSL_SOCK_BASE].setCACert(ssl_ca[s - SSL_SOCK_BASE]);
+        int i = s - SSL_SOCK_BASE;
+        ssls[i].setCACert(ssl_ca[i]);
+        ssls[i].setCertificate(ssl_cert[i]);
+        ssls[i].setPrivateKey(ssl_key[i]);
     }
-    client_of(s).setConnectionTimeout(timeout_ms);
+    if (timeout_ms > 0) {
+        client_of(s).setConnectionTimeout(timeout_ms);
+    }
     /* 点分地址的 TCP 连接用 connect(IPAddress)，AP 运行时也可用；域名与 TLS 要 STA 已连接。是否联网由平台判断 */
     bool by_ip = s < SSL_SOCK_BASE && ip.fromString(argv[1]);
     if (!(by_ip ? client_of(s).connect(ip, (uint16_t)port) : client_of(s).connect(argv[1], (uint16_t)port))) {
@@ -837,19 +849,36 @@ static void cmd_clientconnectname(Stream &io, const char *name, char op, char *a
         reply_error(io, name);
         return;
     }
-    connect_socket(io, name, argv, CONNECT_TIMEOUT_MS);
+    connect_socket(io, name, argv, 0);
 }
 
-/* AT+CLIENTCONNECT=<sock>,<主机>,<端口>,<超时毫秒>（WiFiClient::setConnectionTimeout 之后使用）；超时不超过 8 s */
+static void cmd_clientconnectip(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[3];
+    IPAddress ip;
+    if (op != '=' || split(args, argv, 3) != 3 || !ip.fromString(argv[1])) {
+        reply_error(io, name);
+        return;
+    }
+    connect_socket(io, name, argv, 0);
+}
+
+/* AT+CLIENTCONNECT=<sock>,<主机>,<端口>[,<超时毫秒>]；省略时使用官方 3000 ms 默认值 */
 static void cmd_clientconnect(Stream &io, const char *name, char op, char *args)
 {
     char *argv[4];
     long timeout_ms;
-    if (op != '=' || split(args, argv, 4) != 4 || !parse_long(argv[3], &timeout_ms)) {
+    int n = op == '=' ? split(args, argv, 4) : 0;
+    if (n < 3 || n > 4) {
         reply_error(io, name);
         return;
     }
-    connect_socket(io, name, argv, timeout_ms > 0 && timeout_ms < CONNECT_TIMEOUT_MS ? timeout_ms : CONNECT_TIMEOUT_MS);
+    if (n == 4 && (!parse_long(argv[3], &timeout_ms) || timeout_ms <= 0)) {
+        timeout_ms = CONNECT_TIMEOUT_MS;
+    } else if (n == 3) {
+        timeout_ms = CONNECT_TIMEOUT_MS;
+    }
+    connect_socket(io, name, argv, timeout_ms);
 }
 
 /*
@@ -915,6 +944,47 @@ static void cmd_clientconnected(Stream &io, const char *name, char op, char *arg
         return;
     }
     reply_int(io, name, client_of(s).connected() ? 1 : 0);
+}
+
+static void cmd_clientstate(Stream &io, const char *name, char op, char *args)
+{
+    int s = op == '=' ? socket_arg(name, args) : -1;
+    if (s < 0) {
+        reply_error(io, name);
+        return;
+    }
+    if (client_of(s).connected()) {
+        char result[64];
+        snprintf(result, sizeof(result), "%s,%u,%u", client_of(s).remoteIP().toString().c_str(),
+                 (unsigned)client_of(s).remotePort(), (unsigned)client_of(s).localPort());
+        reply(io, name, result);
+    } else {
+        reply(io, name, "");
+    }
+}
+
+static void cmd_ipclient(Stream &io, const char *name, char op, char *args)
+{
+    int s = op == '=' ? socket_arg(name, args) : -1;
+    if (s < 0) {
+        reply_error(io, name);
+        return;
+    }
+    if (client_of(s).connected()) {
+        reply(io, name, client_of(s).localIP().toString().c_str());
+    } else {
+        reply(io, name, "");
+    }
+}
+
+static void cmd_clientstatus(Stream &io, const char *name, char op, char *args)
+{
+    int s = op == '=' ? socket_arg(name, args) : -1;
+    if (s < 0) {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, "");
 }
 
 static void cmd_clientclose(Stream &io, const char *name, char op, char *args)
@@ -1040,15 +1110,156 @@ static void cmd_setcaroot(Stream &io, const char *name, char op, char *args)
     io.print("OK\r\n");
 }
 
-/* AT+SETECCSLOT=<sock>,<槽>,<n> 加 n 字节证书：本板没有安全芯片，读完载荷后回 ERROR */
+static bool store_pem_payload(Stream &io, long size, char **slot)
+{
+    if (size <= 0 || size > CA_MAX) {
+        read_payload(io, size, nullptr);
+        return false;
+    }
+    char *pem = static_cast<char *>(malloc((size_t)size + 1));
+    if (pem == nullptr) {
+        read_payload(io, size, nullptr);
+        return false;
+    }
+    BufferSink sink(reinterpret_cast<uint8_t *>(pem), size);
+    bool ok = read_payload(io, size, &sink);
+    if (!ok) {
+        free(pem);
+        return false;
+    }
+    pem[size] = '\0';
+    free(*slot);
+    *slot = pem;
+    return true;
+}
+
+static void cmd_sslclientsetcert(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[2]; long size;
+    int n = op == '=' ? split(args, argv, 2) : 0;
+    int s = n == 2 ? ssl_slot(argv[0]) : -1;
+    bool parsed = n == 2 && parse_long(argv[1], &size);
+    bool stored = parsed && s >= 0 && store_pem_payload(io, size, &ssl_cert[s]);
+    if (parsed && s < 0) {
+        read_payload(io, size, nullptr);
+    }
+    if (!stored) {
+        reply_error(io, name);
+        return;
+    }
+    ssls[s].setCertificate(ssl_cert[s]);
+    reply(io, name, "");
+}
+
+static void cmd_sslclientsetpkey(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[2]; long size;
+    int n = op == '=' ? split(args, argv, 2) : 0;
+    int s = n == 2 ? ssl_slot(argv[0]) : -1;
+    bool parsed = n == 2 && parse_long(argv[1], &size);
+    bool stored = parsed && s >= 0 && store_pem_payload(io, size, &ssl_key[s]);
+    if (parsed && s < 0) {
+        read_payload(io, size, nullptr);
+    }
+    if (!stored) {
+        reply_error(io, name);
+        return;
+    }
+    ssls[s].setPrivateKey(ssl_key[s]);
+    reply(io, name, "");
+}
+
+static char *der_to_pem(const uint8_t *der, size_t size, const char *header, const char *footer)
+{
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t encoded = ((size + 2) / 3) * 4;
+    size_t cap = strlen(header) + encoded + (encoded + 63) / 64 + strlen(footer) + 1;
+    char *pem = static_cast<char *>(malloc(cap));
+    if (pem == nullptr) {
+        return nullptr;
+    }
+    size_t out = 0, line = 0;
+    memcpy(pem + out, header, strlen(header));
+    out += strlen(header);
+    for (size_t i = 0; i < size; i += 3) {
+        uint32_t v = uint32_t(der[i]) << 16;
+        if (i + 1 < size) v |= uint32_t(der[i + 1]) << 8;
+        if (i + 2 < size) v |= der[i + 2];
+        pem[out++] = alphabet[(v >> 18) & 63];
+        pem[out++] = alphabet[(v >> 12) & 63];
+        pem[out++] = i + 1 < size ? alphabet[(v >> 6) & 63] : '=';
+        pem[out++] = i + 2 < size ? alphabet[v & 63] : '=';
+        line += 4;
+        if (line == 64 && i + 3 < size) {
+            pem[out++] = '\n';
+            line = 0;
+        }
+    }
+    memcpy(pem + out, footer, strlen(footer));
+    out += strlen(footer);
+    pem[out] = '\0';
+    if (out >= cap) {
+        free(pem);
+        return nullptr;
+    }
+    return pem;
+}
+
+/* AT+SETECCSLOT=<sock>,<槽>,<n>：证书用本次载荷，私钥从 littlefs Preferences 的 tls-sse/slotN 读取。 */
 static void cmd_seteccslot(Stream &io, const char *name, char op, char *args)
 {
     char *argv[3];
-    long n;
-    if (op == '=' && split(args, argv, 3) == 3 && parse_long(argv[2], &n) && n > 0) {
-        read_payload(io, n, nullptr);
+    long n = 0;
+    long slot = -1;
+    int s = -1;
+    if (op == '=' && split(args, argv, 3) == 3 && parse_long(argv[1], &slot) && slot >= 0 && slot <= 15 &&
+        parse_long(argv[2], &n) && n > 0 && n <= 4096) {
+        s = ssl_slot(argv[0]);
     }
-    reply_error(io, name);
+    if (s < 0) {
+        if (n > 0) read_payload(io, n, nullptr);
+        reply_error(io, name);
+        return;
+    }
+    uint8_t *der = static_cast<uint8_t *>(malloc((size_t)n));
+    BufferSink der_sink(der, n);
+    bool got = der != nullptr && read_payload(io, n, &der_sink);
+    if (!got) {
+        free(der);
+        reply_error(io, name);
+        return;
+    }
+    char key_name[16];
+    snprintf(key_name, sizeof(key_name), "slot%ld", slot);
+    Preferences sse;
+    size_t key_size = 0;
+    if (!sse.begin(TLS_SLOT_NAMESPACE, true, "lfs")) {
+        free(der);
+        reply_error(io, name);
+        return;
+    }
+    key_size = sse.getBytesLength(key_name);
+    char *cert = der_to_pem(der, (size_t)n, "-----BEGIN CERTIFICATE-----\n", "-----END CERTIFICATE-----\n");
+    char *key_der = key_size > 0 && key_size <= Preferences::MAX_VALUE_SIZE ? static_cast<char *>(malloc(key_size)) : nullptr;
+    char *key = nullptr;
+    bool key_ok = key_der != nullptr && sse.getBytes(key_name, key_der, key_size) == key_size;
+    sse.end();
+    if (key_ok) {
+        key = der_to_pem(reinterpret_cast<const uint8_t *>(key_der), key_size,
+                         "-----BEGIN EC PRIVATE KEY-----\n", "-----END EC PRIVATE KEY-----\n");
+    }
+    free(key_der);
+    free(der);
+    if (cert == nullptr || key == nullptr) {
+        free(cert); free(key);
+        reply_error(io, name);
+        return;
+    }
+    free(ssl_cert[s]); ssl_cert[s] = cert;
+    free(ssl_key[s]); ssl_key[s] = key;
+    ssls[s].setCertificate(cert);
+    ssls[s].setPrivateKey(key);
+    reply(io, name, "");
 }
 
 /* 已由 BEGINSERVER 分配的服务端号，否则 -1 */
@@ -1684,30 +1895,41 @@ static const struct {
     { "+HOSTBYNAME", cmd_hostbyname },
     { "+PING", cmd_ping },
     { "+BEGINCLIENT", cmd_beginclient },
+    { "+CLIENTSTATE", cmd_clientstate },
+    { "+CLIENTCONNECTIP", cmd_clientconnectip },
     { "+CLIENTCONNECTNAME", cmd_clientconnectname },
     { "+CLIENTCONNECT", cmd_clientconnect },
     { "+CLIENTSEND", cmd_clientsend },
     { "+AVAILABLE", cmd_available },
     { "+CLIENTRECEIVE", cmd_clientreceive },
     { "+CLIENTCONNECTED", cmd_clientconnected },
+    { "+CLIENTSTATUS", cmd_clientstatus },
     { "+CLIENTCLOSE", cmd_clientclose },
     { "+FLUSH", cmd_flush },
     { "+REMOTEIP", cmd_remoteip },
     { "+REMOTEPORT", cmd_remoteport },
+    { "+IPCLIENT", cmd_ipclient },
+    { "+PEEK", cmd_peek },
     /* TLS：除 SSLBEGINCLIENT、SETCAROOT、SETECCSLOT、SSLPEEK 外与 TCP 客户端共用处理函数 */
     { "+SSLBEGINCLIENT", cmd_sslbeginclient },
     { "+SETCAROOT", cmd_setcaroot },
     { "+SETECCSLOT", cmd_seteccslot },
+    { "+SSLCLIENTSTATE", cmd_clientstate },
+    { "+SSLCLIENTCONNECTIP", cmd_clientconnectip },
     { "+SSLCLIENTCONNECTNAME", cmd_clientconnectname },
     { "+SSLCLIENTCONNECT", cmd_clientconnect },
     { "+SSLCLIENTSEND", cmd_clientsend },
     { "+SSLAVAILABLE", cmd_available },
     { "+SSLCLIENTRECEIVE", cmd_clientreceive },
     { "+SSLCLIENTCONNECTED", cmd_clientconnected },
+    { "+SSLCLIENTSTATUS", cmd_clientstatus },
     { "+SSLCLIENTCLOSE", cmd_clientclose },
     { "+SSLCLIENTFLUSH", cmd_flush },
     { "+SSLREMOTEIP", cmd_remoteip },
     { "+SSLREMOTEPORT", cmd_remoteport },
+    { "+SSLIPCLIENT", cmd_ipclient },
+    { "+SSLCLIENTSETCERT", cmd_sslclientsetcert },
+    { "+SSLCLIENTSETPKEY", cmd_sslclientsetpkey },
     { "+SSLPEEK", cmd_peek },
     { "+BEGINSERVER", cmd_beginserver },
     { "+SERVERAVAILABLE", cmd_serveravailable },

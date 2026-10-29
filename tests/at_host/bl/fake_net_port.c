@@ -136,6 +136,20 @@ int net_port_peer(int sock, uint32_t *addr, uint16_t *port)
     return 0;
 }
 
+int net_port_local(int sock, uint32_t *addr, uint16_t *port)
+{
+    struct sockaddr_in sa;
+    socklen_t len = sizeof(sa);
+
+    require_wifi(__func__);
+    if (getsockname(sock, (struct sockaddr *)&sa, &len) != 0) {
+        return -1;
+    }
+    *addr = sa.sin_addr.s_addr;
+    *port = ntohs(sa.sin_port);
+    return 0;
+}
+
 void net_port_close(int sock)
 {
     require_wifi(__func__);

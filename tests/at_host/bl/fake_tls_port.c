@@ -15,9 +15,13 @@ static bool is_tls(int sock)
     return sock >= 0 && sock < 1024 && opened[sock];
 }
 
-int tls_port_open(int sock, const char *host, const char *ca_pem, uint32_t timeout_ms)
+int tls_port_open(int sock, const char *host, const char *ca_pem,
+                  const char *client_cert_pem, const char *client_key_pem,
+                  uint32_t timeout_ms)
 {
     (void)timeout_ms;
+    (void)client_cert_pem;
+    (void)client_key_pem;
     bool trusted = ca_pem != NULL ? strcmp(ca_pem, FAKE_CA_PEM) == 0 : strcmp(host, FAKE_HOST) == 0;
     if (sock < 0 || sock >= 1024 || opened[sock] || !trusted) {
         return -1;
