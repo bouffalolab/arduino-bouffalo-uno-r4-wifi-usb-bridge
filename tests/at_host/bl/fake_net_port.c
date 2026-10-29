@@ -184,6 +184,7 @@ int net_port_tcp_accept(int listen_sock)
 int net_port_udp_open(uint32_t addr, uint16_t port)
 {
     require_wifi(__func__);
+    int one = 1;
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         return -1;
@@ -193,11 +194,21 @@ int net_port_udp_open(uint32_t addr, uint16_t port)
     sa.sin_family = AF_INET;
     sa.sin_port = htons(port);
     sa.sin_addr.s_addr = addr;
-    if (bind(sock, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0 ||
+        bind(sock, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
         close(sock);
         return -1;
     }
     return sock;
+}
+
+/* IGMP is a fake here. This harness does not validate radio group membership. */
+int net_port_udp_join(int sock, uint32_t group)
+{
+    require_wifi(__func__);
+    (void)sock;
+    /* The fixed lwIP rejects explicit membership in its implicit all-hosts group. */
+    return ntohl(group) == 0xe0000001u ? -1 : 0;
 }
 
 int net_port_udp_send(int sock, uint32_t addr, uint16_t port, const uint8_t *buf, size_t len)

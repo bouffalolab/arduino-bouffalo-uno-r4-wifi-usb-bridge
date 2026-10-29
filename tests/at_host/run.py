@@ -360,7 +360,7 @@ def main():
     check("UDP 回显服务收到的长度依次为 1400、5、4、1460（%s）" % servers.udp_lens, servers.udp_lens == [1400, 5, 4, 1460])
     check("4 个 UDP 成功、第 5 个失败、释放后可再用（%s）" % v("UDPSOCKETS"), n("UDPSOCKETS") == [4, 0, 1])
     u = n("UDPMULTI")
-    check("组播 beginMulticast 1 s 内返回 0（%s）" % u, u is not None and u[0] == 0 and u[1] < 1000)
+    check("组播 beginMulticast 在fake IGMP下1 s内成功（%s）" % u, u is not None and u[0] == 1 and u[1] < 1000)
     peer_thread.join(timeout=5)
     check("联网前 WiFiServer.begin 失败（%s）" % v("EARLYSERVER"), n("EARLYSERVER") == [0])
     check("服务端 begin（%s）；客户端线程无异常（%s）" % (v("SRVBEGIN"), peer.get("error")),

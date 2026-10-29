@@ -56,7 +56,7 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 | 文件 AT（MOUNTFS、FS 的删除/覆盖/读取/追加），调用平台 LittleFS | experimental | BL616CL 1V0 + 真实 RA4M1、官方 WiFiS3 1.6.0：10009 字节二进制、1023 字节读取、分段/非法帧/超时、满盘报错及删除复用通过；限制见下文及 ARDUINO-47 记录 |
 | Preferences AT（九条 PREF 命令），调用平台 Preferences/LittleFS | experimental | 原版RA Modem类型往返、二进制、真实满盘/恢复及普通文件共存通过；见下文与ARDUINO-48 |
 | SNTP 时间查询与 DHCP hostname（GETTIME、HOSTNAME） | experimental | BL616CL 1V0，时间与 DHCP option 12 实机证据见 ARDUINO-45 task；RAM 主机名、UTC 时钟与 TLS 策略限制见下文 |
-| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、OTA | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
+| OTA | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
 
 ## 文件 AT 使用边界
 
@@ -152,3 +152,11 @@ Preferences 命令辅助检查：`python3 tests/at_host/pref_check.py <编译目
 ## 时间与主机名（ARDUINO-45）
 
 `AT+GETTIME=` 立即读取平台 `WiFi.getTime()`，未同步回 0，不等待 SNTP。`AT+HOSTNAME?` 查询，`AT+HOSTNAME=name` 调用平台 setter；名称校验、RAM 生命周期及 DHCP 生效时机属于平台。默认 SNTP 为 `pool.ntp.org`；新增命令不改 TLS 策略。需要完整 `bl616cl-libs` 0.8.0 和配套平台，协议与明确的上游差异见工作区 `docs/reference/wifis3-at-protocol.md`，实机验收见 ARDUINO-45 task。
+
+## UDP 组播与目标复用（ARDUINO-50）
+
+依赖平台及`bl616cl-libs` 0.9.0。`AT+UDPBEGINMULTI=port,groupIP`分配0..3的UDP编号，加入IPv4组；`AT+BEGINPACKETMULTI=sock`选入组目标，`AT+UDPBEGINPACKET=sock`复用最近显式/组播目标或收到的数据报来源。后两条成功应答空结果及OK，仍通过UDPWRITE/UDPENDPACKET发送。无当前目标、非组播socket调用组播begin、非法编号/组/端口和缺参返回命令ERROR，失败不占编号。UDPSTOP关闭socket，由平台/lwIP离组。
+
+组播port必须1..65535、地址224..239开头且符合底层组限制；0.0.0.0不退化为普通UDP，数字严格解析，这是与固定官方ESP32的宽松入参差异。4个UDP对象与TCP/TLS共用平台8个socket；耗尽明确失败，关闭后可复用。1460字节上限与错误载荷消费/帧同步合同保持不变。WiFiS3会发送前两种命令；无参数UDPBEGINPACKET也按固定官方真实实现覆盖。
+
+当前experimental：真实RA4M1使用未修改WiFiS3经vela双向1/255/1460字节组播、来源IP/端口、离组后无接收、四组同端口、20轮循环、编号复用、三种目标复用、UART错误帧同步及UDP/TCP/TLS资源边界已实机验证，最终固件与证据见独立ARDUINO-50任务。软件/fake IGMP仅验证协议，不能替代此实机记录。无线组播可能丢报，不能推导为可靠传输或长稳验收；STA/AP并行沿用同信道限制。

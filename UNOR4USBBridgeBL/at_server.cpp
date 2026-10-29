@@ -1200,19 +1200,21 @@ static void cmd_serverend(Stream &io, const char *name, char op, char *args)
 }
 
 /* AT+UDPBEGIN=<本地端口>[,<本地地址>]：应答 UDP 编号 */
-static void cmd_udpbegin(Stream &io, const char *name, char op, char *args)
+static void udp_begin(Stream &io, const char *name, char op, char *args, bool multicast)
 {
     char *argv[2];
     long port;
     IPAddress local;
     int n = op == '=' ? split(args, argv, 2) : 0;
-    if (n == 0 || !parse_long(argv[0], &port) || port < 0 || port > 65535 || (n == 2 && !local.fromString(argv[1]))) {
+    if (n == 0 || !parse_long(argv[0], &port) || port < 0 || port > 65535 ||
+        (n == 2 && !local.fromString(argv[1])) || (multicast && (n != 2 || port == 0))) {
         reply_error(io, name);
         return;
     }
     for (int u = 0; u < MAX_UDP; u++) {
         if (!udp_allocated[u]) {
-            if (!(n == 2 ? udps[u].begin(local, (uint16_t)port) : udps[u].begin((uint16_t)port))) {
+            if (!(multicast ? udps[u].beginMulticast(local, (uint16_t)port) :
+                  n == 2 ? udps[u].begin(local, (uint16_t)port) : udps[u].begin((uint16_t)port))) {
                 break;
             }
             udp_allocated[u] = true;
@@ -1221,6 +1223,36 @@ static void cmd_udpbegin(Stream &io, const char *name, char op, char *args)
         }
     }
     reply_error(io, name);
+}
+
+static void cmd_udpbegin(Stream &io, const char *name, char op, char *args)
+{
+    udp_begin(io, name, op, args, false);
+}
+
+static void cmd_udpbeginmulti(Stream &io, const char *name, char op, char *args)
+{
+    udp_begin(io, name, op, args, true);
+}
+
+static void begin_existing_packet(Stream &io, const char *name, char op, char *args, bool multicast)
+{
+    int u = op == '=' ? udp_arg(args) : -1;
+    if (u < 0 || !(multicast ? udps[u].beginMulticastPacket() : udps[u].beginPacket())) {
+        reply_error(io, name);
+        return;
+    }
+    reply(io, name, "");
+}
+
+static void cmd_udpbeginpacket(Stream &io, const char *name, char op, char *args)
+{
+    begin_existing_packet(io, name, op, args, false);
+}
+
+static void cmd_beginpacketmulti(Stream &io, const char *name, char op, char *args)
+{
+    begin_existing_packet(io, name, op, args, true);
 }
 
 /* AT+UDPBEGINPACKETIP=<udp>,<端口>,<地址>、AT+UDPBEGINPACKETADD=<udp>,<端口>,<主机名>（beginPacket(host)） */
@@ -1682,8 +1714,10 @@ static const struct {
     { "+SERVERACCEPT", cmd_serveraccept },
     { "+SERVERWRITE", cmd_serverwrite },
     { "+SERVEREND", cmd_serverend },
-    /* 组播（UDPBEGINMULTI、BEGINPACKETMULTI）未实现，按未知命令回 ERROR */
     { "+UDPBEGIN", cmd_udpbegin },
+    { "+UDPBEGINMULTI", cmd_udpbeginmulti },
+    { "+UDPBEGINPACKET", cmd_udpbeginpacket },
+    { "+BEGINPACKETMULTI", cmd_beginpacketmulti },
     { "+UDPBEGINPACKETIP", cmd_udpbeginpacketip },
     { "+UDPBEGINPACKETADD", cmd_udpbeginpacketadd },
     { "+UDPWRITE", cmd_udpwrite },
