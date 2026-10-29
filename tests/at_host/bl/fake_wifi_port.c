@@ -29,6 +29,30 @@ static uint32_t dns_now[2];
 static bool ap_up, ap_failed;
 static uint32_t ap_ip, ap_mask, ap_gw, ap_cfg_ip, ap_cfg_mask, ap_cfg_gw;
 static bool auto_reconnect = true, ipv6;
+static char hostname[32] = "bl616cl-AABBCC";
+
+unsigned long wifi_port_time(void)
+{
+    const char *value = getenv("AT_HOST_TIME");
+    return value != NULL ? strtoul(value, NULL, 10) : 0;
+}
+
+const char *wifi_port_hostname(void)
+{
+    return hostname;
+}
+
+int wifi_port_set_hostname(const char *name)
+{
+    strcpy(hostname, name);
+    return 0;
+}
+
+int wifi_port_config_time(const char *server)
+{
+    (void)server;
+    return 0; /* Fake only: no packets or time synchronization. */
+}
 
 static void use_dhcp_dns(void)
 {

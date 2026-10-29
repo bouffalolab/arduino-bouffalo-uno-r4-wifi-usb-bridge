@@ -55,7 +55,8 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 | BLE HCI over AT（HCIBEGIN、HCIEND、HCIWAIT、HCIAVAILABLE、HCIREAD、HCIWRITE） | experimental | Linux + BL616CL 1V0、libs 0.5.0、真实 RA4M1 使用未修改 ArduinoBLE 2.1.0：7 个官方示例通过；central/peripheral 各 3 次连接、60 轮 GATT 读写/通知；STA/TCP 与 BLE/USB 60 轮并发及 10 轮 BLE 启停通过。BL 仅运行 Controller；公共地址、RAM 密钥的数字比较/拒绝/超时/加密读写通知与密钥重连已实测；RPA、密钥持久化与长稳未验收，见下文及 ARDUINO-44 记录 |
 | 文件 AT（MOUNTFS、FS 的删除/覆盖/读取/追加），调用平台 LittleFS | experimental | BL616CL 1V0 + 真实 RA4M1、官方 WiFiS3 1.6.0：10009 字节二进制、1023 字节读取、分段/非法帧/超时、满盘报错及删除复用通过；限制见下文及 ARDUINO-47 记录 |
 | Preferences AT（九条 PREF 命令），调用平台 Preferences/LittleFS | experimental | 原版RA Modem类型往返、二进制、真实满盘/恢复及普通文件共存通过；见下文与ARDUINO-48 |
-| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、HOSTNAME、时间、OTA | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
+| SNTP 时间查询与 DHCP hostname（GETTIME、HOSTNAME） | experimental | BL616CL 1V0，时间与 DHCP option 12 实机证据见 ARDUINO-45 task；RAM 主机名、UTC 时钟与 TLS 策略限制见下文 |
+| UDP 组播（UDPBEGINMULTI、BEGINPACKETMULTI）、OTA | unimplemented | 对应 AT 命令回 `+<命令>:ERROR` |
 
 ## 文件 AT 使用边界
 
@@ -147,3 +148,7 @@ Preferences 命令辅助检查：`python3 tests/at_host/pref_check.py <编译目
 `BEGINSOFTAP=ssid[,pass[,channel[,hidden[,max_connection]]]]` 默认 open / 1 / 0 / 5。隐藏必须影响 beacon 与 wildcard probes；关联上限接受1..5，SDK最多4槽，默认5有效上限4。非法帧回 `+CMD:ERROR`；可解析但无效的 AP 参数回0，不能停掉当前正常连接。AP地址当前支持/24，变更地址会重启DHCP。mode2的 `IPSTA=1/2` 按既有 WiFiS3 行为返回 AP 网关/掩码，mode3返回独立STA配置；`IPSTA=0` 始终为STA地址。
 
 需要底层 `bl616cl-libs` 0.7.0 与配套平台源码。首块板验证与缺项以本轮 task 记录为准；主机/fake 检查不能证明无线行为，单客户端不能验收多客户端关联上限。
+
+## 时间与主机名（ARDUINO-45）
+
+`AT+GETTIME=` 立即读取平台 `WiFi.getTime()`，未同步回 0，不等待 SNTP。`AT+HOSTNAME?` 查询，`AT+HOSTNAME=name` 调用平台 setter；名称校验、RAM 生命周期及 DHCP 生效时机属于平台。默认 SNTP 为 `pool.ntp.org`；新增命令不改 TLS 策略。需要完整 `bl616cl-libs` 0.8.0 和配套平台，协议与明确的上游差异见工作区 `docs/reference/wifis3-at-protocol.md`，实机验收见 ARDUINO-45 task。

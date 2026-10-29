@@ -425,6 +425,32 @@ static void cmd_fwversion_u32(Stream &io, const char *name, char op, char *args)
 }
 
 /* Mode and radio lifecycle belong to the platform WiFi library. */
+static void cmd_gettime(Stream &io, const char *name, char op, char *args)
+{
+    if (op != '=' || args[0] != '\0') {
+        reply_error(io, name);
+        return;
+    }
+    char value[12];
+    snprintf(value, sizeof(value), "%lu", WiFi.getTime());
+    reply(io, name, value);
+}
+
+static void cmd_hostname(Stream &io, const char *name, char op, char *args)
+{
+    if (op == '?') {
+        const char *value = WiFi.getHostname();
+        if (value != nullptr) {
+            reply(io, name, value);
+            return;
+        }
+    } else if (op == '=' && WiFi.setHostname(args)) {
+        reply(io, name, "");
+        return;
+    }
+    reply_error(io, name);
+}
+
 static void cmd_wifimode(Stream &io, const char *name, char op, char *args)
 {
     if (op == '?') {
@@ -1602,6 +1628,8 @@ static const struct {
     { "+FWVERSION", cmd_fwversion },
     { "+FWVERSION_U32", cmd_fwversion_u32 },
     { "+WIFIMODE", cmd_wifimode },
+    { "+GETTIME", cmd_gettime },
+    { "+HOSTNAME", cmd_hostname },
     { "+BEGINSTA", cmd_beginsta },
     { "+GETSTATUS", cmd_getstatus },
     { "+IPSTA", cmd_ipsta },
