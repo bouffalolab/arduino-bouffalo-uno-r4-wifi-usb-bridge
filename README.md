@@ -93,6 +93,8 @@ ArduinoBLE 此版本的 AT transport `end()` 为空，释放 Controller 需通�
 
 配对实测使用自定义 RA4M1 安全探针和实体 AX200/Bumble，ArduinoBLE 库保持未修改：未加密访问返回 ATT 0x0F；数字比较接受/拒绝、8 秒确认超时、30 秒配对窗口到期、10 轮加密读写/通知、关闭新配对后的已有密钥重连通过。密钥仅留 RAM，不记录密钥或确认码。此测试采用公共地址；未验证 RPA 或掉电后的密钥恢复。负例与正例之间复位 RA4M1：该库可能跨连接保留受保护读取的延迟响应；不宣称覆盖这条连续恢复路径。
 
+ARDUINO-53补充：原版ArduinoBLE 2.1.0与BlueZ公共地址对端在不分发initiator IdKey时，首次配对加密通过但未保存LTK，绑定重连失败。需要该场景时，按[RA端ArduinoBLE兼容补丁](compatibility/ArduinoBLE-2.1.0/README.md)显式修正用户library并重新构建RA程序；补丁不改BL Core或bridge固件。不能把原版与Bumble通过描述为原版BlueZ绑定重连也通过。
+
 当前硬件未验收其余五个官方示例：LedControl、ButtonLED 缺按钮接线，BatteryMonitor 缺确定 A0 输入，EncryptedBatteryMonitor 还需板型/安全适配，SensorTagButton 缺 TI SensorTag 实物。12 例编译通过仅为软件辅助检查。
 
 本轮 0.5.0 包额外通过 AP 回归：信道 1/6 在 BLE 开启前、开启中、关闭后均可被真实扫描发现；信道 6 下电脑连入、DHCP、3 次 ping、60 轮 TCP/UDP/BLE/USB 并发及 10 次 BLE 启停后 TCP 保持通过。此前扫描脚本未等待 NetworkManager 的 LastScan 更新，得到“未看到 AP”；加入扫描完成检查后通过，旧失败及修改前 bridge 对照日志保留，不能据此宣称 bridge 曾出现 AP 回归。

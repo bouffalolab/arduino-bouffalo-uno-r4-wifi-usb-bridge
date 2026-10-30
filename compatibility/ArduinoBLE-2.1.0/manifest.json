@@ -1,0 +1,33 @@
+{
+  "upstream": "arduino-libraries/ArduinoBLE",
+  "version": "2.1.0",
+  "source_tag": "2.1.0",
+  "files": [
+    {
+      "name": "HCI.cpp",
+      "url": "https://raw.githubusercontent.com/arduino-libraries/ArduinoBLE/2.1.0/src/utility/HCI.cpp",
+      "official_tag_sha256": "8a74bc8d33f5b676c05c382ca7e19f7f5549e2e5ecfebb0b4f52ff8549513a6f",
+      "fixed_installed_sha256": "8a74bc8d33f5b676c05c382ca7e19f7f5549e2e5ecfebb0b4f52ff8549513a6f",
+      "normalize_CRLF_equal": true,
+      "patched_sha256": "d112b98d332b3f4aed81cde9647a11d9d2d65ef60e7ff4cdff8078202eb5e04e"
+    },
+    {
+      "name": "L2CAPSignaling.cpp",
+      "url": "https://raw.githubusercontent.com/arduino-libraries/ArduinoBLE/2.1.0/src/utility/L2CAPSignaling.cpp",
+      "official_tag_sha256": "307499571f4474283da2644170c80700112563a1dcabb9c95dfbbf80314c0146",
+      "fixed_installed_sha256": "307499571f4474283da2644170c80700112563a1dcabb9c95dfbbf80314c0146",
+      "normalize_CRLF_equal": true,
+      "patched_sha256": "91bee0c14c2c16f1391c55d428ba282d6e518d953384c9532a8d2683bc8d5590"
+    }
+  ],
+  "patch_sha256": "3819e291ca7a2afcc363a36c1a3768fdfedf70bed434b21d3bc7a83e7c477bc7",
+  "ownership": "RA4M1 host library compatibility; no BL Core/Controller/bridge protocol change",
+  "supported_case": "LE Secure Connections with public-address peer that does not offer initiator IdKey",
+  "unverified": [
+    "RPA/static-random no-IdKey fallback",
+    "power-persistent bonding",
+    "other ArduinoBLE versions"
+  ],
+  "license": "original ArduinoBLE LGPL-2.1 terms and notices retained; patch modifies its SMP/HCI implementation",
+  "modified_on": "2026-10-30"
+}

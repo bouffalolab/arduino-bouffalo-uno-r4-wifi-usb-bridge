@@ -1,0 +1,21 @@
+--- a/src/utility/L2CAPSignaling.cpp
++++ b/src/utility/L2CAPSignaling.cpp
+@@ -154,2 +154,2 @@
+-      ATT.remoteKeyDistribution = responseKD;// KeyDistribution(pairingRequest->initiatorKeyDistribution);
+-      ATT.localKeyDistribution = responseKD; //KeyDistribution(pairingRequest->responderKeyDistribution);
++      ATT.remoteKeyDistribution = KeyDistribution(pairingRequest->initiatorKeyDistribution & responseKD.getOctet());
++      ATT.localKeyDistribution = KeyDistribution(pairingRequest->responderKeyDistribution & responseKD.getOctet());
+@@ -185 +185 @@
+-      } response = { CONNECTION_PAIRING_RESPONSE, HCI.localIOCap(), 0, HCI.localAuthreq().getOctet(), 0x10, responseKD.getOctet(), responseKD.getOctet()};
++      } response = { CONNECTION_PAIRING_RESPONSE, HCI.localIOCap(), 0, HCI.localAuthreq().getOctet(), 0x10, ATT.remoteKeyDistribution.getOctet(), ATT.localKeyDistribution.getOctet()};
+--- a/src/utility/HCI.cpp
++++ b/src/utility/HCI.cpp
+@@ -923,0 +924,8 @@
++        }
++        // A public peer may bond without distributing an identity key.
++        // Store its SC LTK now; no identity-address packet will follow.
++        if (!ATT.remoteKeyDistribution.IdKey() && _storeLTK != 0) {
++          uint8_t peerAddress[7];
++          if (ATT.getPeerAddrWithType(encryptionChange->connectionHandle, peerAddress) && peerAddress[0] == 0) {
++            _storeLTK(&peerAddress[1], HCI.LTK);
++          }
