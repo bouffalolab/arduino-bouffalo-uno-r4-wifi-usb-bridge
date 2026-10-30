@@ -1,20 +1,20 @@
-# ArduinoBLE 2.1.0 公共地址绑定重连兼容补丁
+# ArduinoBLE 2.1.0 public-address bonded reconnection patch
 
-这是RA4M1 Host library的补丁，不修改BL616CL Core、Controller或bridge协议。普通未加密GATT、官方BLE示例和既有Bumble公共地址/身份密钥分发路径仍可使用原库；需要与不发送initiator IdKey的BlueZ公共地址对端绑定重连时，应用本补丁并重新构建RA程序。
+This patch targets the RA4M1 Host library. It does not change the BL616CL Core, Controller, or bridge protocol. Ordinary unencrypted GATT, official BLE examples, and the existing Bumble public-address/identity-key distribution path can still use the original library. For bonded reconnection with a BlueZ public-address peer that does not send an initiator IdKey, apply this patch and rebuild the RA program.
 
-## 问题与修正
+## Problem and correction
 
-官方2.1.0把双方key distribution固定回复为IdKey(2)，没有与请求掩码求交；长期密钥保存回调只在收到Identity Address时调用。实机BlueZ请求initiator=13（不含IdKey）、responder=15；首次加密成功，但不会发送本端Identity Address，RA端未保存LTK。重新连接时getLTK返回0，Controller报告加密status6。该原版失败可以复现，原始记录不删除。
+Official 2.1.0 always replies with IdKey(2) for both key distribution fields without intersecting the request masks. It invokes the long-term key storage callback only upon receiving an Identity Address. On hardware, BlueZ requested initiator=13 (without IdKey), responder=15. Initial encryption succeeded, but BlueZ did not send its Identity Address, so the RA side did not store the LTK. On reconnection, getLTK returned 0 and the Controller reported encryption status6. The original failure is reproducible; its raw records are retained.
 
-补丁将双方key distribution与本库支持的IdKey求交。若本次Secure Connections配对的公共地址对端不分发IdKey，在加密建立时按已知公共地址调用原storeLTK回调；对端分发IdKey时继续走原身份地址回调。应用仍负责正确保存/查询密钥，不提供默认成功值。
+The patch intersects both key distribution masks with the IdKey supported by this library. If a public-address peer does not distribute IdKey in this Secure Connections pairing, the original storeLTK callback is invoked with its known public address when encryption is established. Peers distributing IdKey retain the original identity-address callback path. The application remains responsible for storing and retrieving keys correctly; no fixed success result is supplied.
 
-本补丁只处理已经实测的公共地址场景。RPA、没有IdKey的随机地址及掉电后密钥持久化不在此补丁验收范围。测试密钥仅放RAM，不记录LTK/IRK或数字比较码。
+This patch covers only the public-address scenario tested on hardware. RPA, random-address peers without IdKey, and key persistence across power loss are outside its acceptance scope. Test keys remain in RAM; LTK/IRK and numeric comparison codes are not logged.
 
-## 标准Arduino安装与构建
+## Standard Arduino installation and build
 
-安装Renesas UNO core 1.6.0和ArduinoBLE 2.1.0。通过Arduino IDE或CLI配置找到用户sketchbook的library目录，将BLE_LIBRARY设置为其中ArduinoBLE目录；不要修改BL平台安装目录或在普通sketch构建时自动打补丁。
+Install Renesas UNO core 1.6.0 and ArduinoBLE 2.1.0. Locate the user sketchbook libraries directory through the Arduino IDE or CLI configuration and set BLE_LIBRARY to its ArduinoBLE directory. Do not modify the BL platform installation or apply the patch automatically during ordinary sketch builds.
 
-先用manifest.json中的原始SHA256核对HCI.cpp和L2CAPSignaling.cpp，再在本仓库根目录执行：
+First verify HCI.cpp and L2CAPSignaling.cpp against the original SHA256 values in manifest.json, then run from this repository root:
 
 ```sh
 patch --dry-run -p1 -d "$BLE_LIBRARY" < compatibility/ArduinoBLE-2.1.0/public-peer-bond.patch
@@ -23,12 +23,12 @@ arduino-cli compile -b arduino:renesas_uno:unor4wifi --build-path "$RA_BUILD" "$
 arduino-cli upload -b arduino:renesas_uno:unor4wifi -p "$RA_PORT" --input-dir "$RA_BUILD" "$RA_SKETCH"
 ```
 
-应用后两个源文件SHA应与manifest.json的patched_sha256一致。补丁不能重复应用；版本或校验不符时停止，重新安装准确版本，不用模糊修改掩盖差异。Arduino Library Manager更新或重装会替换用户library，需重新核对，不承诺适用于未来版本。
+After application, both source file hashes must match patched_sha256 in manifest.json. Do not apply the patch twice. If the version or hashes differ, stop and reinstall the exact version rather than masking the difference with fuzzy edits. Arduino Library Manager updates or reinstalls replace the user library, requiring verification again. Compatibility with future versions is not promised.
 
-回退可使用patch -R在同一library撤销，或重装官方2.1.0，再重建RA程序；回退后原BlueZ绑定重连限制仍存在。BL固件不需要因此重刷。
+To revert, use patch -R in the same library or reinstall official 2.1.0, then rebuild the RA program. The original BlueZ bonded reconnection limitation returns after rollback. The BL firmware does not need reflashing for this change.
 
-## 实机与来源
+## Hardware evidence and provenance
 
-ARDUINO-53，Linux x86_64、RA4M1/Renesas1.6.0、BL616CL 1V0候选9d345c2d、真实AX200/BlueZ5.72和Bumble0.0.236。原版BlueZ路径失败、补丁版配对拒绝/接受、加密10轮读写/通知及关闭新配对后的重连通过；Bumble身份密钥分发、加密重连和窗口到期回归通过。重复重连的实际轮次和原始日志在对应task补充验收包中列明。
+ARDUINO-53: Linux x86_64, RA4M1/Renesas1.6.0, BL616CL 1V0 candidate 9d345c2d, and real AX200/BlueZ5.72 and Bumble0.0.236. The original BlueZ path failed. With the patch, pairing rejection/acceptance, 10 encrypted read/write/notification rounds, and reconnection with new pairing disabled passed. Bumble identity-key distribution, encrypted reconnection, and pairing-window expiry regressions passed. Actual repeated reconnection counts and raw logs are listed in the corresponding task supplement acceptance package.
 
-源文件与官方2.1.0 tag逐字节一致后再修改，原始及修改后SHA见manifest.json。保留原LGPL-2.1许可于LICENSE.ArduinoBLE；本补丁修改SMP协商及LTK保存时机，不改变第三方版权声明。尚未向Arduino上游提交，不宣称官方已合并此修正。
+Source files were verified byte-for-byte against the official 2.1.0 tag before modification. Original and patched SHA values are in manifest.json. The original LGPL-2.1 license is retained as LICENSE.ArduinoBLE. This patch changes SMP negotiation and LTK storage timing without changing third-party copyright notices. It has not been submitted to Arduino upstream and is not presented as an official fix.
