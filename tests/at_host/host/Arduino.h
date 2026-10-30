@@ -1,22 +1,28 @@
 #pragma once
 
 /*
- * 主机测试用的 Arduino 环境：ArduinoCore-API 的通用类，加一个建在文件描述符上的串口。
- * RA4M1 侧（WiFiS3）与 BL616CL 侧（at_server 加平台 WiFi 库）各编成一个程序，两个 FdSerial 经 socketpair 相连。
+ * Host Arduino environment: ArduinoCore-API plus file-descriptor serial. Compile RA WiFiS3 and BL
+ * at_server/platform WiFi into separate programs connected through socketpair-backed FdSerial
+ * instances.
  */
-#include <stdarg.h> /* renesas core 的 Arduino.h 带入的标准头，WiFiS3 直接使用 */
+#include <stdarg.h> /* Standard headers normally included by the Renesas Arduino.h and used directly by WiFiS3. */
 #include <stdio.h>
 
 #include "api/ArduinoAPI.h"
 #include "api/HardwareSerial.h"
 
-/* renesas core 的 FifoBuffer.h 用它关中断；主机程序单线程，按普通代码块处理 */
+/*
+ * Renesas FifoBuffer uses this interrupt guard; the host is single-threaded, so an ordinary block
+ * suffices.
+ */
 #define synchronized
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* 平台 Arduino.h 的 BL616CL 接口；主机替身在 bl/bl_main.cpp */
+/**
+ * @brief Declare the host-test reset substitute, which prints a marker and exits.
+ */
 void resetToBootloader(void) __attribute__((noreturn));
 #ifdef __cplusplus
 }
@@ -25,23 +31,75 @@ void resetToBootloader(void) __attribute__((noreturn));
 #ifdef __cplusplus
 using namespace arduino;
 
-/* 读不等待；写阻塞到全部发出（socketpair 缓冲足够大，对端总在读） */
+/*
+ * Nonblocking reads; writes block until complete because socketpair buffering and the active peer
+ * permit progress.
+ */
 class FdSerial : public HardwareSerial {
 public:
+    /**
+     * @brief Construct a host serial adapter without claiming a hardware UART.
+     */
     FdSerial() = default;
-    FdSerial(int tx, int rx) { (void)tx; (void)rx; } /* WiFiS3 非 UNO R4 WiFi 分支的构造方式，本测试不用 */
+    /**
+     * @brief Construct a host serial adapter without claiming a hardware UART.
+     */
+    FdSerial(int tx, int rx) { (void)tx; (void)rx; } /* Constructor used by non-UNO-R4 WiFiS3 branches, not exercised here. */
+    /**
+     * @brief Destroy the host serial adapter without taking ownership of its descriptor.
+     */
     virtual ~FdSerial() = default;
+    /**
+     * @brief Attach the host serial fixture to a caller-owned file descriptor.
+     */
     void setFd(int fd) { fd_ = fd; }
+    /**
+     * @brief Accept Arduino serial arguments without configuring a hardware UART.
+     */
     void begin(unsigned long) override {}
+    /**
+     * @brief Accept Arduino serial arguments without configuring a hardware UART.
+     */
     void begin(unsigned long, uint16_t) override {}
+    /**
+     * @brief Leave the caller-owned host descriptor open; this fixture does not own a hardware
+     * UART.
+     */
     void end() override {}
+    /**
+     * @brief Host-only fixture: return the currently readable byte count without consuming
+     * input.
+     */
     int available() override;
+    /**
+     * @brief Host-only fixture: return the next input byte without consuming it, or -1 when
+     * none is available.
+     */
     int peek() override;
+    /**
+     * @brief Host-only fixture: consume available input bytes; return the byte/count or the
+     * interface-specific empty/error value.
+     */
     int read() override;
+    /**
+     * @brief Provide a no-op host serial hook because writes already send directly to the
+     * descriptor.
+     */
     void flush() override {}
+    /**
+     * @brief Host-only fixture: write the supplied byte or buffer and return the accepted byte
+     * count.
+     */
     size_t write(uint8_t c) override { return write(&c, 1); }
+    /**
+     * @brief Host-only fixture: write the supplied byte or buffer and return the accepted byte
+     * count.
+     */
     size_t write(const uint8_t *buf, size_t size) override;
     using Print::write;
+    /**
+     * @brief Report whether this object currently refers to a usable resource.
+     */
     operator bool() override { return fd_ >= 0; }
 
 private:
@@ -49,6 +107,6 @@ private:
     int peeked_ = -1;
 };
 
-typedef FdSerial UART; /* WiFiS3 的 Modem 用这个类型名 */
+typedef FdSerial UART; /* Type name expected by the WiFiS3 Modem. */
 extern FdSerial Serial2;
 #endif

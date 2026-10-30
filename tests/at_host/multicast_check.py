@@ -15,6 +15,7 @@ import time
 
 
 def run(server, root):
+    """Run the selected host-only test scenario with isolated fixture resources."""
     a, b = socket.socketpair()
     a.settimeout(3)
     proc = subprocess.Popen([server, str(b.fileno())], pass_fds=(b.fileno(),),
@@ -23,6 +24,7 @@ def run(server, root):
     count = 0
 
     def check(command, value='', error=False, payload=b''):
+        """Host-only fixture: validate the selected artifact or fixture and raise an error on a failed invariant."""
         nonlocal count
         name = command[2:].split('=')[0].rstrip('?')
         expected = (name+':ERROR\r\n' if error else name+': '+str(value)+'\r\nOK\r\n').encode()

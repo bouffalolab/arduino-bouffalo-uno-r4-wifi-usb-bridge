@@ -10,17 +10,20 @@ import time
 
 
 def number(command, value):
+    """Construct the expected numeric AT response used by the host test."""
     return f'+{command}: {value}\r\n\r\nOK\r\n'.encode()
 
 
 class Probe:
     def __init__(self, server, directory, fault=None):
+        """Initialize the isolated host-test fixture and its owned resources."""
         self.sock, child = socket.socketpair(); self.sock.settimeout(3)
         self.proc = subprocess.Popen([server, str(child.fileno())], pass_fds=(child.fileno(),),
             env=dict(os.environ, AT_HOST_FS_ROOT=directory, **(fault or {})))
         child.close(); self.count = 0
 
     def check(self, name, request, expected, fragments=()):
+        """Host-only fixture: validate the selected artifact or fixture and raise an error on a failed invariant."""
         for part in (request,) + tuple(fragments):
             self.sock.sendall(part)
             if fragments: time.sleep(.015)
@@ -36,13 +39,16 @@ class Probe:
         self.count += 1; print('PASS', name, flush=True)
 
     def command(self, command, arguments, value):
+        """Send one Preferences host-test command and verify its numeric response."""
         self.check(command+' '+arguments, f'AT+{command}{arguments}\r\n'.encode(), number(command,value))
 
     def close(self):
+        """Close the host-test fixture and release its process and socket resources."""
         self.sock.close(); self.proc.terminate(); self.proc.wait(timeout=3)
 
 
 def standard(server, directory):
+    """Run the normal Preferences host-fixture checks."""
     p=Probe(server,directory)
     try:
         p.check('unopened stat',b'AT+PREFSTAT\r\n',b'+PREFSTAT:ERROR\r\n')
@@ -115,6 +121,7 @@ def standard(server, directory):
 
 
 def faults(server,directory):
+    """Run Preferences host-fixture fault-injection checks."""
     total=0
     seed=Probe(server,directory)
     try:

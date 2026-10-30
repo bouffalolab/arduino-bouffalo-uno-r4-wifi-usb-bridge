@@ -1,4 +1,4 @@
-/* 主机测试用的时间函数、FdSerial 与 api/itoa.h 要求的转换函数 */
+/* Host timing functions, FdSerial and integer conversions required by api/itoa.h. */
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -9,6 +9,9 @@
 
 FdSerial Serial2;
 
+/**
+ * @brief Return monotonic host microseconds for software-test Arduino timing.
+ */
 static uint64_t now_us()
 {
     struct timespec ts;
@@ -19,30 +22,48 @@ static uint64_t now_us()
 static const uint64_t start_us = now_us();
 
 extern "C" {
+/**
+ * @brief Return elapsed program milliseconds with unsigned Arduino wraparound.
+ */
 unsigned long millis(void)
 {
     return (unsigned long)((now_us() - start_us) / 1000u);
 }
 
+/**
+ * @brief Return elapsed program microseconds with unsigned Arduino wraparound.
+ */
 unsigned long micros(void)
 {
     return (unsigned long)(now_us() - start_us);
 }
 
+/**
+ * @brief Sleep on the host for the requested milliseconds; this fixture does not run FreeRTOS.
+ */
 void delay(unsigned long ms)
 {
     usleep(ms * 1000u);
 }
 
+/**
+ * @brief Sleep on the host for the requested microseconds using usleep, without busy-waiting.
+ */
 void delayMicroseconds(unsigned int us)
 {
     usleep(us);
 }
 
+/**
+ * @brief Provide a no-op host fixture hook; this process does not run the SDK scheduler.
+ */
 void yield(void)
 {
 }
 
+/**
+ * @brief Format a host-test integer with the requested sign and radix.
+ */
 static char *to_radix(unsigned long value, bool negative, char *string, int radix)
 {
     char tmp[sizeof(unsigned long) * 8 + 1];
@@ -63,28 +84,44 @@ static char *to_radix(unsigned long value, bool negative, char *string, int radi
     return string;
 }
 
+/**
+ * @brief Format a host signed long using the local radix converter, adding a sign for negative
+ * decimal values.
+ */
 char *ltoa(long value, char *string, int radix)
 {
     bool negative = radix == 10 && value < 0;
     return to_radix(negative ? 0ul - (unsigned long)value : (unsigned long)value, negative, string, radix);
 }
 
+/**
+ * @brief Format a host unsigned long using the local radix converter.
+ */
 char *ultoa(unsigned long value, char *string, int radix)
 {
     return to_radix(value, false, string, radix);
 }
 
+/**
+ * @brief Convert a signed integer into caller-provided text storage.
+ */
 char *itoa(int value, char *string, int radix)
 {
     return radix == 10 ? ltoa(value, string, radix) : to_radix((unsigned int)value, false, string, radix);
 }
 
+/**
+ * @brief Convert an unsigned integer into caller-provided text storage.
+ */
 char *utoa(unsigned int value, char *string, int radix)
 {
     return to_radix(value, false, string, radix);
 }
 }
 
+/**
+ * @brief Host-only fixture: return the currently readable byte count without consuming input.
+ */
 int FdSerial::available()
 {
     int n = 0;
@@ -94,6 +131,10 @@ int FdSerial::available()
     return n + (peeked_ >= 0 ? 1 : 0);
 }
 
+/**
+ * @brief Host-only fixture: consume available input bytes; return the byte/count or the
+ * interface-specific empty/error value.
+ */
 int FdSerial::read()
 {
     if (peeked_ >= 0) {
@@ -105,6 +146,10 @@ int FdSerial::read()
     return recv(fd_, &c, 1, MSG_DONTWAIT) == 1 ? c : -1;
 }
 
+/**
+ * @brief Host-only fixture: return the next input byte without consuming it, or -1 when none
+ * is available.
+ */
 int FdSerial::peek()
 {
     if (peeked_ < 0) {
@@ -113,6 +158,10 @@ int FdSerial::peek()
     return peeked_;
 }
 
+/**
+ * @brief Host-only fixture: write the supplied byte or buffer and return the accepted byte
+ * count.
+ */
 size_t FdSerial::write(const uint8_t *buf, size_t size)
 {
     size_t done = 0;

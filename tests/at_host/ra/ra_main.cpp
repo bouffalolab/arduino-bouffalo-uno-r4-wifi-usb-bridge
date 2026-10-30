@@ -1,8 +1,9 @@
 /*
- * RA4M1 侧：未修改的 WiFiS3 经串口向 BL616CL 侧发 AT，逐项输出 "<项> <值>..."，由 run.py 判定。
- * 用法：ra_host <串口 fd> <网络名> <密码> <回显端口> <关闭端口> <UDP 回显端口> <UDP 本地端口> <服务端口,另 5 个空闲端口>
- * 回显端口原样发回收到的字节；关闭端口发 "bye\n" 后关闭连接。UDP 回显服务把数据报原样发回来源，
- * 收到 "push" 时改从另一个 socket 发 "pushed"。服务端各项由 run.py 的客户端线程按顺序配合（见 run.py 的 server_peer）。
+ * Host RA endpoint: unmodified WiFiS3 sends AT to the BL endpoint and prints results for run.py.
+ * Usage: ra_host <serial-fd> <ssid> <pass> <echo-port> <close-port> <UDP-echo-port> <UDP-local-
+ * port> <server-port-and-five-spares>. TCP echo returns bytes; close service sends bye then
+ * closes. UDP echo reflects datagrams, while push triggers pushed from a different socket.
+ * server_peer in run.py sequences server-client checks.
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -16,12 +17,17 @@
 
 static const IPAddress loopback(127, 0, 0, 1);
 
+/**
+ * @brief Print a tagged six-byte MAC address in the RA compatibility fixture.
+ */
 static void mac_line(const char *item, const uint8_t *m)
 {
     printf("%s %02X:%02X:%02X:%02X:%02X:%02X\n", item, m[0], m[1], m[2], m[3], m[4], m[5]);
 }
 
-/* 读到 n 字节或超时 */
+/**
+ * @brief Read n bytes or stop at the timeout.
+ */
 static size_t read_n(WiFiClient &c, uint8_t *buf, size_t n, unsigned long timeout_ms)
 {
     size_t got = 0;
@@ -37,7 +43,10 @@ static size_t read_n(WiFiClient &c, uint8_t *buf, size_t n, unsigned long timeou
     return got;
 }
 
-/* 发 n 字节（含 0x00、\r\n、'|'）读回，输出 "<项> <连接> <写出> <读回> <一致>" */
+/**
+ * @brief Round-trip n bytes including NUL, CRLF and '|'; print "<item> <connected> <written>
+ * <read> <equal>".
+ */
 static void echo(const char *item, WiFiClient &c, int connected, size_t n)
 {
     static uint8_t out[4096], in[4096];
@@ -49,7 +58,9 @@ static void echo(const char *item, WiFiClient &c, int connected, size_t n)
     printf("%s %d %zu %zu %d\n", item, connected, wrote, got, got == n && memcmp(in, out, n) == 0);
 }
 
-/* 等下一个数据报最多 timeout_ms；返回其长度，超时返回 0 */
+/**
+ * @brief Wait up to timeout_ms for the next datagram; return its length or zero on timeout.
+ */
 static int wait_packet(WiFiUDP &u, unsigned long timeout_ms)
 {
     unsigned long start = millis();
@@ -63,7 +74,9 @@ static int wait_packet(WiFiUDP &u, unsigned long timeout_ms)
     return 0;
 }
 
-/* 读完当前数据报（每次最多 chunk 字节），返回字节数 */
+/**
+ * @brief Drain the current datagram in chunks no larger than chunk; return bytes read.
+ */
 static size_t read_packet(WiFiUDP &u, uint8_t *buf, size_t max, size_t chunk)
 {
     size_t got = 0;
@@ -77,7 +90,10 @@ static size_t read_packet(WiFiUDP &u, uint8_t *buf, size_t max, size_t chunk)
     return got;
 }
 
-/* TLS：BL 侧的 tls_port 是明文替身（见 bl/fake_tls_port.c），这里检验命令、证书参数传递与编号管理 */
+/**
+ * @brief BL tls_port is a plaintext substitute here; verify commands, certificate-argument
+ * transfer and identifier management only.
+ */
 static void ssl_tests(uint16_t echo_port, uint16_t close_port)
 {
     {
@@ -90,7 +106,10 @@ static void ssl_tests(uint16_t echo_port, uint16_t close_port)
         while (c.available() == 0 && millis() - start < 3000) {
             delay(1);
         }
-        int peek = c.peek(); /* WiFiS3 的 available() 只问 SSLAVAILABLE，SSLPEEK 看模块侧，应为 'p' */
+        int peek = c.peek(); /*
+ * WiFiS3 available queries SSLAVAILABLE; SSLPEEK inspects the module-side next byte, expected to
+ * be 'p'.
+ */
         uint8_t two[2] = { 0, 0 };
         size_t got = read_n(c, two, 2, 3000);
         printf("SSLPEEK %d %zu %d\n", peek, got, got == 2 && two[0] == 'p' && two[1] == 'k');
@@ -99,7 +118,7 @@ static void ssl_tests(uint16_t echo_port, uint16_t close_port)
     }
     {
         WiFiSSLClient c;
-        int r = c.connect(loopback, echo_port); /* 按地址字符串校验：根证书束只认 FAKE_HOST */
+        int r = c.connect(loopback, echo_port); /* Dotted-address certificate check: fake bundled trust accepts FAKE_HOST only. */
         printf("SSLUNTRUSTED %d\n", r);
         c.stop();
     }
@@ -113,7 +132,7 @@ static void ssl_tests(uint16_t echo_port, uint16_t close_port)
         int bad = c.connect(loopback, echo_port);
         c.stop();
         c.setCACert(nullptr);
-        int bundle = c.connect(FAKE_HOST, echo_port); /* 不带载荷的 SETCAROOT 恢复用根证书束 */
+        int bundle = c.connect(FAKE_HOST, echo_port); /* SETCAROOT without payload restores bundled roots. */
         c.stop();
         printf("SSLCAFLOW %d %d\n", bad, bundle);
     }
@@ -124,7 +143,7 @@ static void ssl_tests(uint16_t echo_port, uint16_t close_port)
         int ecc = e.connect(FAKE_HOST, echo_port);
         e.stop();
         WiFiSSLClient c;
-        c.setConnectionTimeout(1500); /* SSLCLIENTCONNECT 带超时 */
+        c.setConnectionTimeout(1500); /* SSLCLIENTCONNECT includes a timeout. */
         int r = c.connect(FAKE_HOST, echo_port);
         echo("SSLTIMEOUT", c, r, 1);
         printf("SSLECC %d\n", ecc);
@@ -143,7 +162,7 @@ static void ssl_tests(uint16_t echo_port, uint16_t close_port)
         c.stop();
     }
     {
-        /* SSL 编号不能用于 CLIENT 命令，反之亦然 */
+        /* SSL identifiers must not work in ordinary CLIENT commands, nor vice versa. */
         WiFiSSLClient sc;
         WiFiClient tc;
         int r = sc.connect(FAKE_HOST, echo_port) && tc.connect(loopback, echo_port);
@@ -171,6 +190,9 @@ static void ssl_tests(uint16_t echo_port, uint16_t close_port)
     }
 }
 
+/**
+ * @brief Exercise UDP commands through the RA WiFiS3 host fixture.
+ */
 static void udp_tests(uint16_t echo_port, uint16_t local_port)
 {
     static uint8_t out[1500], in[1500];
@@ -209,7 +231,7 @@ static void udp_tests(uint16_t echo_port, uint16_t local_port)
         got = read_packet(u, in, sizeof(in), 64);
         printf("UDPPUSH %d %d %u\n", n, got == 6 && memcmp(in, "pushed", 6) == 0, (unsigned)u.remotePort());
 
-        /* 超过 1460 字节：write 失败，帧保持同步，之后的命令照常 */
+        /* A write beyond 1460 bytes fails while preserving framing for later commands. */
         p = u.beginPacket(loopback, echo_port);
         w = u.write(out, 1500);
         e = u.endPacket();
@@ -241,7 +263,10 @@ static void udp_tests(uint16_t echo_port, uint16_t local_port)
     }
 }
 
-/* 从 c 读一行（不含 '\n'）到 line，最多等 timeout_ms；读到返回 true */
+/**
+ * @brief Read a line from c into line, excluding newline, within timeout_ms. Return true when
+ * a line completes.
+ */
 static bool read_line(WiFiClient &c, std::string &line, unsigned long timeout_ms)
 {
     unsigned long start = millis();
@@ -259,8 +284,10 @@ static bool read_line(WiFiClient &c, std::string &line, unsigned long timeout_ms
     return false;
 }
 
-/* 一个服务端轮询 available()，对每行回一行，直到处理 n 行或超时；返回处理的行数。
-   upper 为真时回大写的原文，否则回 "k" */
+/**
+ * @brief Poll available(), reply to each line, and stop after n lines or timeout. Return
+ * handled lines. upper echoes uppercase; otherwise reply k.
+ */
 static int serve_lines(WiFiServer &srv, int n, bool upper, unsigned long timeout_ms, int *same)
 {
     WiFiClient first;
@@ -289,7 +316,9 @@ static int serve_lines(WiFiServer &srv, int n, bool upper, unsigned long timeout
     return done;
 }
 
-/* ports[0] 为主服务端口，ports[1..5] 用于服务端个数上限 */
+/**
+ * @brief ports[0] is the main listener; ports[1..5] exercise the server-count limit.
+ */
 static void server_tests(const uint16_t *ports)
 {
     WiFiServer srv(ports[0]);
@@ -332,7 +361,7 @@ static void server_tests(const uint16_t *ports)
     srv.end();
     printf("SRVEND %d\n", (int)(bool)srv);
     {
-        /* 不用 ports[0]：run.py 此时在确认它已不再接受连接 */
+        /* Do not reuse ports[0] while run.py confirms it no longer accepts connections. */
         WiFiServer more[5] = { ports[1], ports[2], ports[3], ports[4], ports[5] };
         int ok = 0;
         for (int i = 0; i < 4; i++) {
@@ -351,17 +380,22 @@ static void server_tests(const uint16_t *ports)
     }
 }
 
-/* 输出 "<项> <个数> <毫秒>"，再每个网络一行 "<项>AP <序号>|<ssid>|<bssid>|<rssi>|<信道>|<加密>" */
+/**
+ * @brief Print "<item> <count> <ms>" then one "<item>AP
+ * <index>|<ssid>|<bssid>|<rssi>|<channel>|<encryption>" row per network.
+ */
 static const char *ip_s(IPAddress a)
 {
-    static char buf[8][16]; /* 一行 printf 最多用 5 个 */
+    static char buf[8][16]; /* At most five formatted values per printf call. */
     static int k;
     char *p = buf[k++ % 8];
     snprintf(p, 16, "%s", a.toString().c_str());
     return p;
 }
 
-/* 已连上（DHCP）时调用；结束时恢复 DHCP 并重新连上 */
+/**
+ * @brief Called with active DHCP; restore DHCP and reconnect before returning.
+ */
 static void staticip_tests(const char *ssid, const char *pass, uint16_t echo_port)
 {
     std::string res;
@@ -388,19 +422,21 @@ static void staticip_tests(const char *ssid, const char *pass, uint16_t echo_por
     printf("SETIPBAD %d %d\n", few, bad);
     WiFi.config(IPAddress(0, 0, 0, 0));
     printf("SETIPDHCP %s %s %s\n", ip_s(WiFi.localIP()), ip_s(WiFi.gatewayIP()), ip_s(WiFi.dnsIP(0)));
-    /* SOFTRESETWIFI 恢复 DHCP（WiFiS3 只在第一次调用时发，这里直接发） */
+    /* SOFTRESETWIFI restores DHCP; WiFiS3 sends it only on its first call, so issue it directly here. */
     WiFi.config(IPAddress(127, 0, 0, 2));
     bool reset = modem.write(std::string(PROMPT(_SOFTRESETWIFI)), res, "%s", CMD(_SOFTRESETWIFI));
     st = WiFi.begin(ssid, pass);
     printf("SOFTRESETDHCP %d %d %s\n", reset, st, ip_s(WiFi.localIP()));
 }
 
-/* 已连上（DHCP）时调用；结束时 AP 已停止、STA 未连接 */
+/**
+ * @brief Called with active DHCP; leave AP stopped and STA disconnected.
+ */
 static void ap_tests(const char *ssid, const char *pass, uint16_t port, uint16_t udp_port)
 {
     std::string res;
     uint8_t mac[6];
-    /* SSID()、softAPSSID() 共用 WiFiS3 的同一个缓冲区，分开输出 */
+    /* SSID() and softAPSSID() share a WiFiS3 buffer; print them separately. */
     int st = WiFi.beginAP("bl-ap", "ap-pass-1", 6);
     printf("APBEGIN %d %d %s %s %s %s\n", st, WiFi.status(), ip_s(WiFi.localIP()), ip_s(WiFi.subnetMask()),
            ip_s(WiFi.gatewayIP()), ip_s(WiFi.softAPIP()));
@@ -409,7 +445,7 @@ static void ap_tests(const char *ssid, const char *pass, uint16_t port, uint16_t
     mac_line("APMAC", WiFi.macAddress(mac));
     printf("APSTA %s %s\n", ip_s(WiFi.dnsIP(0)), WiFi.RSSI() == 0 ? "0" : "x");
     {
-        /* AP 运行时（STA 未连接）TCP 服务端、按地址连接、UDP 可用 */
+        /* TCP server, dotted-address client and UDP remain usable in AP-only mode. */
         WiFiServer srv(port);
         srv.begin();
         WiFiClient c;
@@ -429,14 +465,17 @@ static void ap_tests(const char *ssid, const char *pass, uint16_t port, uint16_t
         printf("APUDP %d\n", (int)u.begin(udp_port));
         u.stop();
     }
-    /* WiFiS3 的 config 先发 SOFTAPCONFIG（网关即地址）再发 SETIP */
+    /* WiFiS3 config sends SOFTAPCONFIG (gateway equals address) before SETIP. */
     WiFi.config(IPAddress(192, 48, 56, 2));
     st = WiFi.beginAP("bl-ap2", "ap-pass-2");
     printf("APCONFIG %d %d %s %s\n", st, WiFi.status(), ip_s(WiFi.localIP()), ip_s(WiFi.subnetMask()));
     printf("APSSID2 %s\n", WiFi.softAPSSID());
     st = WiFi.beginAP("bl-open");
     printf("APOPEN %d %d\n", st, WiFi.status());
-    /* 平台拒绝的参数回 0、运行中的 AP 不受影响；底层启动失败后状态为 WL_AP_FAILED */
+    /*
+ * Rejected AP parameters return zero without disturbing a running AP; backend start failure
+ * reports WL_AP_FAILED.
+ */
     int shortpass = WiFi.beginAP("bl-ap", "short");
     int badch = WiFi.beginAP("bl-ap", "ap-pass-1", 14);
     printf("APBAD %d %d %d\n", shortpass, badch, WiFi.status());
@@ -447,18 +486,21 @@ static void ap_tests(const char *ssid, const char *pass, uint16_t port, uint16_t
     bool cfgbad = modem.write(std::string(PROMPT(_SOFTAPCONFIG)), res, "%s%s\r\n", CMD_WRITE(_SOFTAPCONFIG),
                               "192.168.4.1,192.168.4.1");
     printf("APERR %d %d\n", hidden, cfgbad);
-    /* begin 先发 WIFIMODE=1：停止 AP，STA 照常连上 */
+    /* begin first sends WIFIMODE=1, stopping AP before connecting STA. */
     WiFi.beginAP("bl-ap", "ap-pass-1");
     WiFi.config(IPAddress(0, 0, 0, 0));
     st = WiFi.begin(ssid, pass);
     printf("APTOSTA %d %d %s %s\n", st, WiFi.status(), ip_s(WiFi.localIP()), ip_s(WiFi.softAPIP()));
-    /* end 发 SOFTRESETWIFI：停止 AP */
+    /* end sends SOFTRESETWIFI, stopping AP. */
     WiFi.beginAP("bl-ap", "ap-pass-1");
     int before = WiFi.status();
     WiFi.end();
     printf("APEND %d %d %s\n", before, WiFi.status(), ip_s(WiFi.softAPIP()));
 }
 
+/**
+ * @brief Print the Wi-Fi scan results used by this test sketch.
+ */
 static void scan(const char *item)
 {
     unsigned long t = millis();
@@ -472,6 +514,9 @@ static void scan(const char *item)
     }
 }
 
+/**
+ * @brief Run the host AT bridge fixture on the supplied file descriptor.
+ */
 extern "C" int host_main(int argc, char **argv)
 {
     if (argc != 9) {
@@ -500,7 +545,7 @@ extern "C" int host_main(int argc, char **argv)
     printf("FW %s\n", WiFi.firmwareVersion());
     printf("FWU32 %06lx\n", (unsigned long)WiFi.firmwareVersionU32());
 
-    /* 联网之前：连接、解析都应失败，BL 侧不能因此出错 */
+    /* Before network initialization, connections/resolution must fail without crashing BL. */
     {
         WiFiClient c;
         printf("EARLYCONNECT %d\n", c.connect(loopback, echo_port));
@@ -514,13 +559,13 @@ extern "C" int host_main(int argc, char **argv)
         s.begin();
         printf("EARLYSERVER %d\n", (int)(bool)s);
     }
-    /* 未连接时扫描；BL 侧替身依次给出一张表、空表、失败 */
+    /* Disconnected scans return a table, then an empty table, then failure from the BL substitute. */
     scan("SCAN");
     scan("SCANEMPTY");
     scan("SCANFAIL");
 
     WiFi.setTimeout(2000);
-    /* 先调用再输出：printf 参数的求值顺序不确定 */
+    /* Call before printing because printf argument evaluation order is unspecified. */
     st = WiFi.begin(ssid, "wrong-pass");
     printf("BADPASS %d %d\n", st, WiFi.status());
     st = WiFi.begin("no-such-net", pass);
@@ -611,7 +656,7 @@ extern "C" int host_main(int argc, char **argv)
     WiFi.disconnect();
     printf("DISC %d\n", WiFi.status());
     {
-        // 最后一条：BL 侧应答后复位进下载模式（主机替身退出进程）
+        // Final command: BL acknowledges then enters ROM; the host substitute exits.
         std::string res;
         t = millis();
         bool ok = modem.write(std::string(PROMPT(_RESTART_BOOTLOADER)), res, "%s", CMD(_RESTART_BOOTLOADER));

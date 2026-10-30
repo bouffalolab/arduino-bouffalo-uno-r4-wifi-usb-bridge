@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 def main():
+    """Parse options and run the dap hid check validation or packaging command."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('device')
     args = parser.parse_args()
@@ -21,6 +22,7 @@ def main():
     checks = 0
 
     def check(data, expected):
+        """Validate the selected artifact or fixture and raise an error on a failed invariant."""
         nonlocal checks
         os.write(fd, b'\0' + bytes(data).ljust(64, b'\0'))
         assert select.select([fd], [], [], 3)[0], 'HID response timeout'

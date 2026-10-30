@@ -14,6 +14,7 @@ import time
 
 
 def exchange(sock, request, expected, fragments=()):
+    """Send an AT test request, optionally fragmented, and verify the expected response."""
     for part in (request,) + tuple(fragments):
         sock.sendall(part)
         if fragments:
@@ -28,6 +29,7 @@ def exchange(sock, request, expected, fragments=()):
 
 
 def run(server, directory, fault=None):
+    """Run the selected host-only test scenario with isolated fixture resources."""
     a, b = socket.socketpair()
     a.settimeout(3)
     env = dict(os.environ, AT_HOST_FS_ROOT=directory)
@@ -36,6 +38,7 @@ def run(server, directory, fault=None):
     b.close()
     count = 0
     def check(name, request, response, fragments=()):
+        """Host-only fixture: validate the selected artifact or fixture and raise an error on a failed invariant."""
         nonlocal count
         exchange(a, request, response, fragments)
         count += 1
@@ -77,6 +80,7 @@ def run(server, directory, fault=None):
 
 
 def main():
+    """Parse options and run the file check validation or packaging command."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('server')
     args = ap.parse_args()

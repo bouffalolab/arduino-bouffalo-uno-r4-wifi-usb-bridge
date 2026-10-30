@@ -1,7 +1,7 @@
 /*
- * 主机测试用的 net_port（接口见平台 libraries/WiFi/src/net_port.h），建在 POSIX socket 上。
- * 域名只认 FAKE_HOST；ping 只有 FAKE_IP 应答。在 wifi_port_init 之前调用任何函数都中止进程，
- * 让测试暴露违反平台约定的调用。
+ * Host-only net_port built on POSIX sockets. Resolve only FAKE_HOST and answer ping only for
+ * FAKE_IP. Abort on any call before wifi_port_init, exposing violations that would be invalid on
+ * hardware.
  */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -17,8 +17,11 @@
 #include "fake_ports.h"
 #include "net_port.h"
 
-static uint32_t close_counts[1024]; /* 按 fd 计 */
+static uint32_t close_counts[1024]; /* Indexed by file descriptor. */
 
+/**
+ * @brief Reject host socket-fixture use before simulated Wi-Fi initialization.
+ */
 static void require_wifi(const char *fn)
 {
     if (!fake_wifi_up) {
@@ -27,6 +30,9 @@ static void require_wifi(const char *fn)
     }
 }
 
+/**
+ * @brief Resolve a hostname or dotted address to network-order IPv4; return zero on success.
+ */
 int net_port_resolve(const char *host, uint32_t *addr)
 {
     struct in_addr a;
@@ -43,6 +49,9 @@ int net_port_resolve(const char *host, uint32_t *addr)
     return -1;
 }
 
+/**
+ * @brief Establish a TCP socket within timeout_ms; return its descriptor or -1.
+ */
 int net_port_tcp_connect(uint32_t addr, uint16_t port, uint32_t timeout_ms)
 {
     require_wifi(__func__);
@@ -72,6 +81,9 @@ int net_port_tcp_connect(uint32_t addr, uint16_t port, uint32_t timeout_ms)
     return sock;
 }
 
+/**
+ * @brief Send with a bounded timeout; return bytes sent or -1 before any successful write.
+ */
 int net_port_send(int sock, const uint8_t *buf, size_t len, uint32_t timeout_ms)
 {
     size_t done = 0;
@@ -91,6 +103,9 @@ int net_port_send(int sock, const uint8_t *buf, size_t len, uint32_t timeout_ms)
     return done > 0 || len == 0 ? (int)done : -1;
 }
 
+/**
+ * @brief Return cached/prefetched unread bytes, or -1 when closed and drained.
+ */
 int net_port_available(int sock)
 {
     int n = 0;
@@ -107,6 +122,10 @@ int net_port_available(int sock)
     return r > 0 ? 1 : -1;
 }
 
+/**
+ * @brief Read without waiting, optionally peeking one byte; distinguish no data from
+ * closed/drained.
+ */
 int net_port_recv(int sock, uint8_t *buf, size_t len, bool peek)
 {
     require_wifi(__func__);
@@ -117,11 +136,17 @@ int net_port_recv(int sock, uint8_t *buf, size_t len, bool peek)
     return n > 0 ? (int)n : -1;
 }
 
+/**
+ * @brief Report a live connection or buffered data remaining after peer closure.
+ */
 bool net_port_connected(int sock)
 {
     return net_port_available(sock) >= 0;
 }
 
+/**
+ * @brief Read the peer IPv4 address and port from a valid socket.
+ */
 int net_port_peer(int sock, uint32_t *addr, uint16_t *port)
 {
     struct sockaddr_in sa;
@@ -136,6 +161,9 @@ int net_port_peer(int sock, uint32_t *addr, uint16_t *port)
     return 0;
 }
 
+/**
+ * @brief Read the local IPv4 address and bound port from a valid socket.
+ */
 int net_port_local(int sock, uint32_t *addr, uint16_t *port)
 {
     struct sockaddr_in sa;
@@ -150,6 +178,9 @@ int net_port_local(int sock, uint32_t *addr, uint16_t *port)
     return 0;
 }
 
+/**
+ * @brief Close the socket, clear its receive cache and increment its reuse counter.
+ */
 void net_port_close(int sock)
 {
     require_wifi(__func__);
@@ -159,11 +190,17 @@ void net_port_close(int sock)
     close(sock);
 }
 
+/**
+ * @brief Return the generation counter used to detect socket descriptor reuse.
+ */
 uint32_t net_port_close_count(int sock)
 {
     return sock >= 0 && sock < 1024 ? close_counts[sock] : 0;
 }
 
+/**
+ * @brief Bind/listen on a TCP port and return the listening descriptor, or -1.
+ */
 int net_port_tcp_listen(uint16_t port)
 {
     require_wifi(__func__);
@@ -185,6 +222,9 @@ int net_port_tcp_listen(uint16_t port)
     return sock;
 }
 
+/**
+ * @brief Accept a pending TCP connection without waiting; return -1 if none is available.
+ */
 int net_port_tcp_accept(int listen_sock)
 {
     require_wifi(__func__);
@@ -195,6 +235,9 @@ int net_port_tcp_accept(int listen_sock)
     return sock;
 }
 
+/**
+ * @brief Bind a UDP socket to the supplied address/port, allowing ephemeral port selection.
+ */
 int net_port_udp_open(uint32_t addr, uint16_t port)
 {
     require_wifi(__func__);
@@ -216,7 +259,9 @@ int net_port_udp_open(uint32_t addr, uint16_t port)
     return sock;
 }
 
-/* IGMP is a fake here. This harness does not validate radio group membership. */
+/**
+ * @brief IGMP is a fake here. This harness does not validate radio group membership.
+ */
 int net_port_udp_join(int sock, uint32_t group)
 {
     require_wifi(__func__);
@@ -225,6 +270,9 @@ int net_port_udp_join(int sock, uint32_t group)
     return ntohl(group) == 0xe0000001u ? -1 : 0;
 }
 
+/**
+ * @brief Send one UDP datagram to the supplied destination; return zero on success.
+ */
 int net_port_udp_send(int sock, uint32_t addr, uint16_t port, const uint8_t *buf, size_t len)
 {
     require_wifi(__func__);
@@ -236,6 +284,9 @@ int net_port_udp_send(int sock, uint32_t addr, uint16_t port, const uint8_t *buf
     return sendto(sock, buf, len, 0, (struct sockaddr *)&to, sizeof(to)) == (ssize_t)len ? 0 : -1;
 }
 
+/**
+ * @brief Receive the next UDP datagram without waiting, truncating to the caller's capacity.
+ */
 int net_port_udp_recv(int sock, uint8_t *buf, size_t len, uint32_t *addr, uint16_t *port)
 {
     struct sockaddr_in from;
@@ -251,6 +302,10 @@ int net_port_udp_recv(int sock, uint8_t *buf, size_t len, uint32_t *addr, uint16
     return (int)n;
 }
 
+/**
+ * @brief Perform one ICMP echo exchange and return RTT milliseconds or the documented negative
+ * error.
+ */
 int net_port_ping(uint32_t addr, uint8_t ttl, uint16_t seq, uint32_t timeout_ms)
 {
     (void)ttl;

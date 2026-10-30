@@ -13,6 +13,7 @@ import tempfile
 
 
 def run(server, root, clock):
+    """Run the selected host-only test scenario with isolated fixture resources."""
     a, b = socket.socketpair()
     a.settimeout(3)
     proc = subprocess.Popen([server, str(b.fileno())], pass_fds=(b.fileno(),),
@@ -20,6 +21,7 @@ def run(server, root, clock):
     b.close()
     count = 0
     def check(command, value='', error=False):
+        """Host-only fixture: validate the selected artifact or fixture and raise an error on a failed invariant."""
         nonlocal count
         name = command[2:].split('=')[0].rstrip('?')
         expected = (name+':ERROR\r\n' if error else name+': '+value+'\r\nOK\r\n').encode()
@@ -51,6 +53,7 @@ def run(server, root, clock):
 
 
 def main():
+    """Parse options and run the time check validation or packaging command."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('server')
     args = ap.parse_args()

@@ -12,7 +12,7 @@
 
 ## 构建与上传
 
-固件是 arduino-bl 平台上的 sketch `UNOR4USBBridgeBL/`，FQBN `bouffalolab:bl:unor4wifi_bl616cl`，需要含 HID、external-host Controller 与 littlefs 的 `bl616cl-libs` 0.6.0、`bl-flash-tools` 0.2.0 及配套平台。默认按 1V0 模组（MD GPIO14、SWCLK GPIO12、SWDIO GPIO13）；1V1 映射为 MD GPIO10、SWCLK GPIO8、SWDIO GPIO9，需同时设置 `--build-property compiler.cpp.extra_flags=-DBRIDGE_MODULE_1V1` 与 `--build-property compiler.c.extra_flags=-DBRIDGE_MODULE_1V1`，目前未做 1V1 实板验证。
+固件是 arduino-bl 平台上的 sketch `UNOR4USBBridgeBL/`，FQBN `bouffalolab:bl:unor4wifi_bl616cl`，当前本地候选需要含 HID、external-host Controller、littlefs 及匹配网络 ABI 的 `bl616cl-libs` 0.9.0、`bl-flash-tools` 0.2.0 及配套平台。默认按 1V0 模组（MD GPIO14、SWCLK GPIO12、SWDIO GPIO13）；1V1 映射为 MD GPIO10、SWCLK GPIO8、SWDIO GPIO9，需同时设置 `--build-property compiler.cpp.extra_flags=-DBRIDGE_MODULE_1V1` 与 `--build-property compiler.c.extra_flags=-DBRIDGE_MODULE_1V1`，目前未做 1V1 实板验证。
 
 ```sh
 arduino-cli compile -b bouffalolab:bl:unor4wifi_bl616cl --build-path <编译目录> UNOR4USBBridgeBL
@@ -34,7 +34,7 @@ bridge 运行时自己处理 1200 波特率（给 RA4M1 用），不响应 BL616
 - BL616CL 复位时 GPIO36（J6.4）为高电平。
 - 对 vendor HID 的 report ID 0 发送 Feature，载荷首字节为 `0xAA`（Linux hidraw 调用时前置 report ID 字节 0）。GET Feature 返回本 bridge 版本三个字节，当前 `00 01 00`。这是 BL ROM 更新入口，之后使用 BL 上传工具；不兼容 ESP32 固件镜像或其烧录协议。
 
-经 ROM 下载口上传偶尔失败（2026-10-23 首块板 77 次中 3 次：握手失败 2 次，写入中途 ROM 停止应答 1 次；原因未查明，RA4M1 发或不发串口数据的对照各 15 次都没有失败）。失败后 BL616CL 停在 ROM 下载口，可直接再上传；中途失败后断电重启能否启动未测，不能启动时用 GPIO36 进入下载模式。
+经 ROM 下载口上传偶尔失败（2026-10-23 首块板 77 次中 3 次：握手失败 2 次，写入中途 ROM 停止应答 1 次；原因未查明，RA4M1 发或不发串口数据的对照各 15 次都没有失败）。ARDUINO-52 后续在真实写入中断、全断电并先读回后，通过已确认的 FTDI 控制 GPIO36/复位完成 ROM 恢复；当前候选100次上传通过。历史3/77问题根因仍未知，用户已接受降为Low非阻断，不代表已根治。
 
 ## 功能
 
@@ -107,7 +107,7 @@ Linux 需要 USB 与 hidraw 访问权限，安装平台的 [udev 规则](../ardu
 
 ```sh
 openocd -f tools/ra4m1_swd.cfg
-# 然后用 Cortex-M GDB 连接 localhost:3333。
+# Then connect Cortex-M GDB to localhost:3333.
 ```
 
 该 OpenOCD 配置提供调试和内存访问，未配置 RA4M1 Flash 驱动。编程使用 pyOCD 0.45.0 与 `Renesas.RA_DFP` 6.6.0；先 `pyocd pack install r7fa4m1ab`，用 `pyocd list` 查板子的 USB 序列号。仅将 `arduino:renesas_uno:unor4wifi` 生成的 sketch `.bin` 写到 `0x4000`，长度不得超过 `0x3C000`。`0x0000–0x3FFF` 是 bootloader，DataFlash/配置区不在此上传范围；先保存需要保留的原始固件。

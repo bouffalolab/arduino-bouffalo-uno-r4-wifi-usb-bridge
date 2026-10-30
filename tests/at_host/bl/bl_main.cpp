@@ -1,8 +1,8 @@
 /*
- * BL616CL 侧：at_server 加平台 WiFi 库（wifi_port、net_port 换成主机实现）。用法：bl_host <串口 fd>
- * 环境变量 AT_HOST_TRACE 非空时，把串口上收发的字节写到 stderr（"<" 收、">" 发）。
- * bl_host --early-client <端口>：Wi-Fi 初始化之前直接调用平台 WiFiClient::connect（按地址、按域名），
- * 输出 "EARLYCLIENT <结果> <结果>"；违反平台约定调用 net_port 时进程中止。
+ * Host-side BL endpoint: at_server plus platform WiFi with host wifi/net ports. Usage: bl_host
+ * <serial-fd>. Nonempty AT_HOST_TRACE logs raw RX '<' and TX '>' to stderr. --early-client <port>
+ * probes address/hostname connects before Wi-Fi initialization and prints EARLYCLIENT results;
+ * invalid early net_port calls abort.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +16,10 @@
 
 class TraceSerial : public FdSerial {
 public:
+    /**
+     * @brief Host-only fixture: consume available input bytes; return the byte/count or the
+     * interface-specific empty/error value.
+     */
     int read() override
     {
         int c = FdSerial::read();
@@ -24,6 +28,10 @@ public:
         }
         return c;
     }
+    /**
+     * @brief Host-only fixture: write the supplied byte or buffer and return the accepted byte
+     * count.
+     */
     size_t write(const uint8_t *buf, size_t size) override
     {
         for (size_t i = 0; i < size; i++) {
@@ -35,6 +43,9 @@ public:
 
 private:
     char dir_ = 0;
+    /**
+     * @brief Print direction changes and raw/escaped host-test bytes to stderr.
+     */
     void trace(char dir, uint8_t c)
     {
         if (dir != dir_) {
@@ -45,13 +56,23 @@ private:
     }
 };
 
-/* 平台 resetToBootloader 的替身：在 stderr 打标记后退出，run.py 据此判定 AT+RESTARTBOOTLOADER */
+/*
+ * Host resetToBootloader substitute: print a marker on stderr and exit so run.py can verify the
+ * command.
+ */
+/**
+ * @brief Print the host-test reset marker and exit; no board reset or ROM downloader is
+ * exercised.
+ */
 extern "C" void resetToBootloader(void)
 {
     fprintf(stderr, "RESETTOBOOTLOADER\n");
     exit(0);
 }
 
+/**
+ * @brief Run the host AT bridge fixture on the supplied file descriptor.
+ */
 extern "C" int host_main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--early-client") == 0) {

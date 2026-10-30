@@ -1,4 +1,4 @@
-/* WiFiS3 AT 服务端：行解析、命令表与命令处理，接口说明见 at_server.h */
+/* WiFiS3 AT server: line parsing, dispatch and command handlers; see at_server.h. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,18 +11,18 @@
 #include <Preferences.h>
 
 #include "bridge_version.h"
-#define FW_VERSION         BRIDGE_VERSION_STRING /* 本固件版本，AT+FWVERSION 返回 */
-#define LINE_MAX           256     /* WiFiS3 的请求最长 128 字节 */
-#define MAX_SOCKETS        8       /* 同上游：BEGINCLIENT 分配 0–7 */
-#define MAX_UDP            4       /* 同上游：UDPBEGIN 分配 0–3，与 TCP 的编号各自独立 */
-#define MAX_SERVERS        4       /* 同上游：BEGINSERVER 分配 0–3 */
-#define SERVER_SOCK_BASE   1000    /* 同上游：服务端接入的连接编号 1000–1007，走 CLIENT* 命令 */
-#define MAX_SSL            8       /* 同上游：SSLBEGINCLIENT 分配 2000–2007 */
+#define FW_VERSION         BRIDGE_VERSION_STRING /* Firmware version returned by AT+FWVERSION. */
+#define LINE_MAX           256     /* WiFiS3 requests are at most 128 bytes. */
+#define MAX_SOCKETS        8       /* BEGINCLIENT allocates identifiers 0-7, matching upstream. */
+#define MAX_UDP            4       /* UDPBEGIN allocates 0-3 independently of TCP, matching upstream. */
+#define MAX_SERVERS        4       /* BEGINSERVER allocates 0-3, matching upstream. */
+#define SERVER_SOCK_BASE   1000    /* Accepted clients use 1000-1007 and CLIENT* commands, matching upstream. */
+#define MAX_SSL            8       /* SSLBEGINCLIENT allocates 2000-2007, matching upstream. */
 #define SSL_SOCK_BASE      2000
-#define CA_MAX             16384   /* SETCAROOT 的 PEM 上限 */
-#define CONNECT_TIMEOUT_MS 3000    /* WiFiS3 官方 CLIENTCONNECT 默认值 */
-#define PAYLOAD_TIMEOUT_MS 1000    /* CLIENTSEND 载荷两段之间的最长间隔 */
-#define RECV_MAX           1023    /* WiFiS3 每次 CLIENTRECEIVE 最多要 1023 字节 */
+#define CA_MAX             16384   /* Maximum SETCAROOT PEM length. */
+#define CONNECT_TIMEOUT_MS 3000    /* Official WiFiS3 CLIENTCONNECT default. */
+#define PAYLOAD_TIMEOUT_MS 1000    /* Maximum gap between CLIENTSEND payload chunks. */
+#define RECV_MAX           1023    /* WiFiS3 requests at most 1023 bytes per CLIENTRECEIVE. */
 #define TLS_SLOT_NAMESPACE  "tls-sse"
 
 typedef void (*handler_t)(Stream &io, const char *name, char op, char *args);
@@ -30,10 +30,16 @@ typedef void (*handler_t)(Stream &io, const char *name, char op, char *args);
 static char line[LINE_MAX + 1];
 static size_t line_len;
 static bool line_overflow;
-/* CLIENTSEND、UDPWRITE 的分块，CLIENTRECEIVE、UDPREAD、WIFISCAN 的应答共用；UDPREAD 一次最多一个数据报 */
+/*
+ * Shared chunks/replies for CLIENTSEND, UDPWRITE, CLIENTRECEIVE, UDPREAD and WIFISCAN; UDPREAD
+ * returns at most one datagram.
+ */
 static uint8_t data[WIFI_UDP_BUFFER_SIZE];
 
-static bool wifi_started; /* 发起过 BEGINSTA 或 BEGINSOFTAP：Wi-Fi 协议栈已初始化，断开、停止 AP 才有意义 */
+static bool wifi_started; /*
+ * BEGINSTA or BEGINSOFTAP has initialized networking, making disconnect/AP-stop operations
+ * meaningful.
+ */
 static WiFiClient clients[MAX_SOCKETS];
 static bool allocated[MAX_SOCKETS];
 static WiFiUDP udps[MAX_UDP];
@@ -42,7 +48,7 @@ static WiFiServer servers[MAX_SERVERS];
 static bool server_allocated[MAX_SERVERS];
 static WiFiSSLClient ssls[MAX_SSL];
 static bool ssl_allocated[MAX_SSL];
-static char *ssl_ca[MAX_SSL]; /* SETCAROOT 给的 PEM（'\0' 结尾）；为空时用根证书束 */
+static char *ssl_ca[MAX_SSL]; /* NUL-terminated SETCAROOT PEM; an empty value selects the root bundle. */
 static char *ssl_cert[MAX_SSL];
 static char *ssl_key[MAX_SSL];
 static bool hci_started;
@@ -51,14 +57,19 @@ static size_t hci_visible;
 static bool hci_batch_done;
 static uint8_t hci_header[5];
 static size_t hci_header_used, hci_header_size, hci_payload_left;
-/* 服务端接入的连接，编号 SERVER_SOCK_BASE + i；server 为 -1 表示空位。accepted 为假的由 SERVERAVAILABLE 收下，
-   SERVERWRITE 发给它们（同上游）；为真的由 SERVERACCEPT 交给主机 */
+/*
+ * Accepted clients use SERVER_SOCK_BASE+i; server=-1 marks a free slot. SERVERAVAILABLE retains
+ * unaccepted clients for SERVERWRITE, while SERVERACCEPT transfers accepted ones to the host.
+ */
 static struct {
     WiFiClient client;
     int server = -1;
     bool accepted;
 } conns[MAX_SOCKETS];
 
+/**
+ * @brief Write a successful named AT response followed by the OK terminator.
+ */
 static void reply(Stream &io, const char *name, const char *payload)
 {
     io.print(name);
@@ -67,6 +78,9 @@ static void reply(Stream &io, const char *name, const char *payload)
     io.print("\r\nOK\r\n");
 }
 
+/**
+ * @brief Format a signed integer as a successful named AT response.
+ */
 static void reply_int(Stream &io, const char *name, long value)
 {
     char s[12];
@@ -74,6 +88,9 @@ static void reply_int(Stream &io, const char *name, long value)
     reply(io, name, s);
 }
 
+/**
+ * @brief Format a six-byte MAC address as a successful named AT response.
+ */
 static void reply_mac(Stream &io, const char *name, const uint8_t *mac)
 {
     char s[18];
@@ -81,9 +98,10 @@ static void reply_mac(Stream &io, const char *name, const uint8_t *mac)
     reply(io, name, s);
 }
 
-/*
- * 失败一律回 "+<命令>:ERROR"：WiFiS3 把 RESULT_ERROR 误定义为 "OK"，收到裸 "ERROR" 要等满超时。
- * 冒号后不带空格：WIFISCAN、CLIENTRECEIVE 等命令之前主机调用 avoid_trim_results，不去空格，" ERROR" 认不出
+/**
+ * @brief Always reply "+<command>:ERROR" on failure. WiFiS3 incorrectly defines RESULT_ERROR
+ * as "OK", so bare "ERROR" waits for timeout. Omit the space after ':' because
+ * avoid_trim_results for WIFISCAN/CLIENTRECEIVE would not recognize " ERROR".
  */
 static void reply_error(Stream &io, const char *name)
 {
@@ -91,7 +109,10 @@ static void reply_error(Stream &io, const char *name)
     io.print(":ERROR\r\n");
 }
 
-/* "+<命令>: <n>|" 加 data 的前 n 个原始字节再加 "OK"，中间没有换行；主机按长度读，载荷可含任意字节 */
+/**
+ * @brief Reply "+<command>: <n>|", exactly n raw bytes, then "OK" without an intervening
+ * newline. Length- delimited payloads may contain arbitrary bytes.
+ */
 static void reply_data(Stream &io, const char *name, size_t n)
 {
     io.print(name);
@@ -102,7 +123,10 @@ static void reply_data(Stream &io, const char *name, size_t n)
     io.print("OK\r\n");
 }
 
-/* 按逗号把 args 原地切成最多 max 段，最后一段保留其余逗号；返回段数 */
+/**
+ * @brief Split args in place into at most max comma-separated fields; retain remaining commas
+ * in the last field. Return the field count.
+ */
 static int split(char *args, char **argv, int max)
 {
     int n = 0;
@@ -117,6 +141,9 @@ static int split(char *args, char **argv, int max)
     return n;
 }
 
+/**
+ * @brief Parse a complete signed decimal argument without accepting trailing characters.
+ */
 static bool parse_long(const char *s, long *value)
 {
     char *end;
@@ -124,7 +151,9 @@ static bool parse_long(const char *s, long *value)
     return end != s && *end == '\0';
 }
 
-/* SSLBEGINCLIENT 分配的连接号 2000–2007 对应的位置，否则 -1 */
+/**
+ * @brief Return the slot for SSLBEGINCLIENT identifiers 2000-2007, or -1.
+ */
 static int ssl_slot(const char *s)
 {
     long v;
@@ -132,9 +161,10 @@ static int ssl_slot(const char *s)
     return i >= 0 && i < MAX_SSL && ssl_allocated[i] ? (int)i : -1;
 }
 
-/*
- * 命令参数中的已分配连接号，否则 -1。SSL 命令（名称以 "+SSL" 开头）与 CLIENT 类命令共用处理函数，
- * 前者只接受 SSLBEGINCLIENT 的 2000–2007，后者只接受 BEGINCLIENT 的 0–7 与服务端接入的 1000–1007
+/**
+ * @brief Resolve an allocated client identifier or return -1. Shared handlers accept
+ * SSLBEGINCLIENT 2000-2007 only for names beginning +SSL; ordinary CLIENT commands accept 0-7
+ * and accepted-server clients 1000-1007.
  */
 static int socket_arg(const char *name, const char *s)
 {
@@ -153,6 +183,9 @@ static int socket_arg(const char *name, const char *s)
     return i >= 0 && i < MAX_SOCKETS && conns[i].server >= 0 ? (int)v : -1;
 }
 
+/**
+ * @brief Resolve a validated TCP, accepted-server or TLS identifier to its client object.
+ */
 static WiFiClient &client_of(int s)
 {
     if (s >= SSL_SOCK_BASE) {
@@ -161,6 +194,9 @@ static WiFiClient &client_of(int s)
     return s < SERVER_SOCK_BASE ? clients[s] : conns[s - SERVER_SOCK_BASE].client;
 }
 
+/**
+ * @brief Stop a validated client and release its allocation and owned TLS credential buffers.
+ */
 static void close_socket(int s)
 {
     client_of(s).stop();
@@ -179,22 +215,28 @@ static void close_socket(int s)
     }
 }
 
-/* 已由 UDPBEGIN 分配的 UDP 编号，否则 -1 */
+/**
+ * @brief Return an allocated UDP slot or -1.
+ */
 static int udp_arg(const char *s)
 {
     long v;
     return parse_long(s, &v) && v >= 0 && v < MAX_UDP && udp_allocated[v] ? (int)v : -1;
 }
 
+/**
+ * @brief Close a UDP socket and release its bridge identifier.
+ */
 static void close_udp(int u)
 {
     udps[u].stop();
     udp_allocated[u] = false;
 }
 
-/*
- * 读命令行之后紧跟的 left 个原始字节，边收边写给 sink（为空时只读不写）。出错也读完，保持帧同步；
- * 两段之间超过 PAYLOAD_TIMEOUT_MS 时放弃。全部收到且写出返回 true
+/**
+ * @brief Consume left raw payload bytes after the command line, streaming to sink when
+ * nonnull. Drain even after sink failure to retain frame synchronization. Abandon after a
+ * PAYLOAD_TIMEOUT_MS gap; return true only if all bytes were received and written.
  */
 static bool read_payload(Stream &io, long left, Print *sink)
 {
@@ -219,7 +261,10 @@ static bool read_payload(Stream &io, long left, Print *sink)
     return ok;
 }
 
-/* 主机每次启动后第一个 Wi-Fi 调用前发送，只等 500 ms：先应答，再关 socket、断开 */
+/**
+ * @brief WiFiS3 sends this before its first Wi-Fi call and waits only 500 ms. Acknowledge
+ * before closing sockets/disconnecting.
+ */
 static void cmd_softreset(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -247,11 +292,14 @@ static void cmd_softreset(Stream &io, const char *name, char op, char *args)
         close_udp(u);
     }
     if (wifi_started) {
-        WiFi.end(); /* 断开 STA、停止 AP，同上游 */
+        WiFi.end(); /* Disconnect STA and stop AP, matching upstream. */
     }
-    WiFi.config(IPAddress(0, 0, 0, 0)); /* 恢复 DHCP，同上游 */
+    WiFi.config(IPAddress(0, 0, 0, 0)); /* Restore DHCP, matching upstream. */
 }
 
+/**
+ * @brief Start the external-Host BLE Controller transport and acknowledge its readiness.
+ */
 static void cmd_hcibegin(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -274,6 +322,9 @@ static void cmd_hcibegin(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Set the HCI read wait policy used by subsequent AT transfers.
+ */
 static void cmd_hciwait(Stream &io, const char *name, char op, char *args)
 {
     long timeout;
@@ -288,6 +339,9 @@ static void cmd_hciwait(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Stop the Controller transport and clear bridge HCI framing state.
+ */
 static void cmd_hciend(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -303,6 +357,9 @@ static void cmd_hciend(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Report the currently visible complete HCI receive batch.
+ */
 static void cmd_hciavailable(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -322,6 +379,9 @@ static void cmd_hciavailable(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, hci_visible);
 }
 
+/**
+ * @brief Return the requested bounded HCI bytes in WiFiS3 binary-response framing.
+ */
 static void cmd_hciread(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -365,11 +425,17 @@ static void cmd_hciread(Stream &io, const char *name, char op, char *args)
 
 class HciSink : public Print {
 public:
+    /**
+     * @brief Write the supplied byte or buffer and return the accepted byte count.
+     */
     size_t write(uint8_t byte) override
     {
         return write(&byte, 1);
     }
 
+    /**
+     * @brief Write the supplied byte or buffer and return the accepted byte count.
+     */
     size_t write(const uint8_t *buffer, size_t size) override
     {
         size_t sent = 0;
@@ -382,7 +448,10 @@ public:
     }
 };
 
-/* AT+HCIWRITE=<n> 后紧跟 n 个 H4 字节；ArduinoBLE 的 passthrough 直接发送载荷。 */
+/**
+ * @brief AT+HCIWRITE=<n> is followed by n raw H4 bytes; ArduinoBLE passthrough sends the
+ * payload directly.
+ */
 static void cmd_hciwrite(Stream &io, const char *name, char op, char *args)
 {
     long left;
@@ -405,6 +474,9 @@ static void cmd_hciwrite(Stream &io, const char *name, char op, char *args)
     }
 }
 
+/**
+ * @brief Return the bridge firmware version string.
+ */
 static void cmd_fwversion(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -415,7 +487,10 @@ static void cmd_fwversion(Stream &io, const char *name, char op, char *args)
     reply(io, name, FW_VERSION);
 }
 
-/* AT+FWVERSION_U32?：FW_VERSION 三段各一个原始字节再加 0（同上游 cmds_esp_generic.h），WiFiS3 取前 3 字节 */
+/**
+ * @brief AT+FWVERSION_U32? encodes the three FW_VERSION components as raw bytes plus zero,
+ * matching cmds_esp_generic.h; WiFiS3 consumes the first three bytes.
+ */
 static void cmd_fwversion_u32(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -431,7 +506,9 @@ static void cmd_fwversion_u32(Stream &io, const char *name, char op, char *args)
     io.print("\r\nOK\r\n");
 }
 
-/* Mode and radio lifecycle belong to the platform WiFi library. */
+/**
+ * @brief Mode and radio lifecycle belong to the platform WiFi library.
+ */
 static void cmd_gettime(Stream &io, const char *name, char op, char *args)
 {
     if (op != '=' || args[0] != '\0') {
@@ -443,6 +520,9 @@ static void cmd_gettime(Stream &io, const char *name, char op, char *args)
     reply(io, name, value);
 }
 
+/**
+ * @brief Query or update the platform hostname through AT arguments.
+ */
 static void cmd_hostname(Stream &io, const char *name, char op, char *args)
 {
     if (op == '?') {
@@ -458,6 +538,9 @@ static void cmd_hostname(Stream &io, const char *name, char op, char *args)
     reply_error(io, name);
 }
 
+/**
+ * @brief Query or select the STA/AP interface mode bits.
+ */
 static void cmd_wifimode(Stream &io, const char *name, char op, char *args)
 {
     if (op == '?') {
@@ -482,6 +565,9 @@ static void cmd_wifimode(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Query or change the unexpected-disconnection reconnect policy.
+ */
 static void cmd_reconnect(Stream &io, const char *name, char op, char *args)
 {
     long enable;
@@ -495,8 +581,10 @@ static void cmd_reconnect(Stream &io, const char *name, char op, char *args)
     }
 }
 
-/* Explicit compatibility placeholder: the pinned official implementation also
-   ignores the setter and returns false from getAutoConnect. No Flash storage. */
+/**
+ * @brief Explicit compatibility placeholder: the pinned official implementation also ignores
+ * the setter and returns false from getAutoConnect. No Flash storage.
+ */
 static void cmd_autoconnect(Stream &io, const char *name, char op, char *args)
 {
     long enable;
@@ -509,6 +597,9 @@ static void cmd_autoconnect(Stream &io, const char *name, char op, char *args)
     }
 }
 
+/**
+ * @brief Enable or query supported STA link-local IPv6 addressing.
+ */
 static void cmd_ipv6(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -521,7 +612,10 @@ static void cmd_ipv6(Stream &io, const char *name, char op, char *args)
     }
 }
 
-/* AT+BEGINSTA=<ssid>[,<密码>]：发起连接即应答，主机随后轮询 GETSTATUS。第一个逗号之后都算密码 */
+/**
+ * @brief AT+BEGINSTA=<ssid>[,<pass>]: reply after initiating association; the host polls
+ * GETSTATUS. Everything after the first comma belongs to the passphrase.
+ */
 static void cmd_beginsta(Stream &io, const char *name, char op, char *args)
 {
     char *argv[2];
@@ -540,7 +634,9 @@ static void cmd_beginsta(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
-/* WL_CONNECTED（3）只在取得地址后出现 */
+/**
+ * @brief Report WL_CONNECTED (3) only after acquiring an address.
+ */
 static void cmd_getstatus(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -551,7 +647,9 @@ static void cmd_getstatus(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, WiFi.status());
 }
 
-/* AT+IPSTA=<n>：0 地址、1 网关、2 掩码、3/4 DNS */
+/**
+ * @brief AT+IPSTA=<n>: 0 address, 1 gateway, 2 netmask, 3/4 DNS.
+ */
 static void cmd_ipsta(Stream &io, const char *name, char op, char *args)
 {
     long n;
@@ -570,9 +668,10 @@ static void cmd_ipsta(Stream &io, const char *name, char op, char *args)
     reply(io, name, ip.toString().c_str());
 }
 
-/*
- * AT+SETIP=<地址>,<网关>,<掩码>[,<DNS1>[,<DNS2>]]（同上游，WiFiS3 的 config、setDNS 总是给 5 个）：静态地址，
- * 地址为 0.0.0.0 时恢复 DHCP；为 0.0.0.0 的 DNS 不改
+/**
+ * @brief AT+SETIP=<address>,<gateway>,<mask>[,<DNS1>[,<DNS2>]] selects static addressing;
+ * WiFiS3 config/setDNS always send five fields. Address 0.0.0.0 restores DHCP; zero DNS leaves
+ * that server unchanged.
  */
 static void cmd_setip(Stream &io, const char *name, char op, char *args)
 {
@@ -594,8 +693,10 @@ static void cmd_setip(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
-/* Official defaults: open, channel 1, visible, max 5. The SDK has four
-   association slots; max 5 is a ceiling, not a promise of five-client capacity. */
+/**
+ * @brief Official defaults: open, channel 1, visible, max 5. The SDK has four association
+ * slots; max 5 is a ceiling, not a promise of five-client capacity.
+ */
 static void cmd_beginsoftap(Stream &io, const char *name, char op, char *args)
 {
     char *argv[5];
@@ -614,6 +715,9 @@ static void cmd_beginsoftap(Stream &io, const char *name, char op, char *args)
     reply(io, name, st == WL_AP_LISTENING ? "1" : "0");
 }
 
+/**
+ * @brief Apply AP IPv4 addressing from validated AT arguments.
+ */
 static void cmd_softapconfig(Stream &io, const char *name, char op, char *args)
 {
     char *argv[3];
@@ -630,6 +734,9 @@ static void cmd_softapconfig(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Stop AP while preserving the requested STA mode policy.
+ */
 static void cmd_disconnectsoftap(Stream &io, const char *name, char op, char *args)
 {
     long wifi_off = 0;
@@ -641,7 +748,9 @@ static void cmd_disconnectsoftap(Stream &io, const char *name, char op, char *ar
     reply(io, name, "");
 }
 
-/* AT+IPSOFTAP（不带 '?'，同上游）：AP 未运行时为 0.0.0.0 */
+/**
+ * @brief AT+IPSOFTAP has no '?' suffix, matching upstream; return 0.0.0.0 when AP is stopped.
+ */
 static void cmd_ipsoftap(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -652,6 +761,9 @@ static void cmd_ipsoftap(Stream &io, const char *name, char op, char *args)
     reply(io, name, WiFi.softAPIP().toString().c_str());
 }
 
+/**
+ * @brief Return the active AP SSID.
+ */
 static void cmd_getsoftapssid(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -662,7 +774,10 @@ static void cmd_getsoftapssid(Stream &io, const char *name, char op, char *args)
     reply(io, name, WiFi.softAPSSID());
 }
 
-/* SDK 的 AP 与 STA 接口用同一个 MAC 地址 */
+/**
+ * @brief The SDK AP and STA interfaces share one MAC address; use the common platform MAC
+ * query.
+ */
 static void cmd_macsoftap(Stream &io, const char *name, char op, char *args)
 {
     uint8_t mac[WL_MAC_ADDR_LENGTH];
@@ -674,6 +789,9 @@ static void cmd_macsoftap(Stream &io, const char *name, char op, char *args)
     reply_mac(io, name, WiFi.macAddress(mac));
 }
 
+/**
+ * @brief Return the mode-selected current SSID.
+ */
 static void cmd_getssid(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -684,6 +802,9 @@ static void cmd_getssid(Stream &io, const char *name, char op, char *args)
     reply(io, name, WiFi.SSID());
 }
 
+/**
+ * @brief Return the current Wi-Fi signal strength in dBm.
+ */
 static void cmd_getrssi(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -694,6 +815,9 @@ static void cmd_getrssi(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, WiFi.RSSI());
 }
 
+/**
+ * @brief Return the connected access point BSSID.
+ */
 static void cmd_getbssid(Stream &io, const char *name, char op, char *args)
 {
     uint8_t mac[WL_MAC_ADDR_LENGTH];
@@ -705,6 +829,9 @@ static void cmd_getbssid(Stream &io, const char *name, char op, char *args)
     reply_mac(io, name, WiFi.BSSID(mac));
 }
 
+/**
+ * @brief Return the common platform MAC query in WiFiS3 response format.
+ */
 static void cmd_macsta(Stream &io, const char *name, char op, char *args)
 {
     uint8_t mac[WL_MAC_ADDR_LENGTH];
@@ -716,7 +843,9 @@ static void cmd_macsta(Stream &io, const char *name, char op, char *args)
     reply_mac(io, name, WiFi.macAddress(mac));
 }
 
-/* 加密方式用上游的名称，WiFiS3 按名称换回 wl_enc_type */
+/**
+ * @brief Use upstream encryption names so WiFiS3 can map them back to wl_enc_type.
+ */
 static const char *enc_name(uint8_t enc)
 {
     switch (enc) {
@@ -730,9 +859,10 @@ static const char *enc_name(uint8_t enc)
     }
 }
 
-/*
- * AT+WIFISCAN：应答 "+WIFISCAN: <n>|" 加 n 字节的列表再加 "OK"，每个网络一行
- * "<ssid> | <bssid> | <rssi> | <信道> | <加密>\r\n"。没有网络时 n 为 0（上游只回 "OK"）
+/**
+ * @brief AT+WIFISCAN replies "+WIFISCAN: <n>|", n list bytes and "OK". Each line is "<ssid> |
+ * <bssid> | <rssi> | <channel> | <encryption>\\r\\n". No networks produces n=0 rather than
+ * upstream's bare OK.
  */
 static void cmd_wifiscan(Stream &io, const char *name, char op, char *args)
 {
@@ -742,7 +872,7 @@ static void cmd_wifiscan(Stream &io, const char *name, char op, char *args)
         reply_error(io, name);
         return;
     }
-    /* 10 行，每行最多 32 字节 SSID 加约 45 字节，放得进 data */
+    /* Ten rows, each with a 32-byte SSID and about 45 other bytes, fit in data. */
     char *list = (char *)data;
     size_t len = 0;
     for (int i = 0; i < n; i++) {
@@ -755,6 +885,9 @@ static void cmd_wifiscan(Stream &io, const char *name, char op, char *args)
     reply_data(io, name, len);
 }
 
+/**
+ * @brief Disconnect STA while preserving the requested AP mode policy.
+ */
 static void cmd_disconnect(Stream &io, const char *name, char op, char *args)
 {
     long wifi_off = 0;
@@ -768,6 +901,9 @@ static void cmd_disconnect(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Resolve an AT hostname argument to IPv4.
+ */
 static void cmd_hostbyname(Stream &io, const char *name, char op, char *args)
 {
     IPAddress ip;
@@ -778,7 +914,10 @@ static void cmd_hostbyname(Stream &io, const char *name, char op, char *args)
     reply(io, name, ip.toString().c_str());
 }
 
-/* WiFiS3 发 "AT+PING=,<主机>,<ttl>,<次数>"（等号后多一个逗号）；返回平均往返毫秒数或 WL_PING_* */
+/**
+ * @brief WiFiS3 sends "AT+PING=,<host>,<ttl>,<count>" with an extra comma after '='. Return
+ * mean successful RTT milliseconds or WL_PING_*.
+ */
 static void cmd_ping(Stream &io, const char *name, char op, char *args)
 {
     char *argv[4];
@@ -797,6 +936,9 @@ static void cmd_ping(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, WiFi.ping(a[0], (uint8_t)ttl, (uint8_t)count));
 }
 
+/**
+ * @brief Allocate a free plain TCP client identifier without connecting it.
+ */
 static void cmd_beginclient(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -812,7 +954,10 @@ static void cmd_beginclient(Stream &io, const char *name, char op, char *args)
     reply_error(io, name);
 }
 
-/* SSL 连接先设好 SETCAROOT 给的证书。服务端接入的连接不能再连 */
+/**
+ * @brief Configure SETCAROOT trust before SSL connect. Accepted server connections cannot
+ * reconnect.
+ */
 static void connect_socket(Stream &io, const char *name, char **argv, long timeout_ms)
 {
     long port;
@@ -832,7 +977,10 @@ static void connect_socket(Stream &io, const char *name, char **argv, long timeo
     if (timeout_ms > 0) {
         client_of(s).setConnectionTimeout(timeout_ms);
     }
-    /* 点分地址的 TCP 连接用 connect(IPAddress)，AP 运行时也可用；域名与 TLS 要 STA 已连接。是否联网由平台判断 */
+    /*
+ * Dotted TCP addresses use connect(IPAddress), also usable in AP mode. Hostname/TLS paths require
+ * STA; the platform determines network availability.
+ */
     bool by_ip = s < SSL_SOCK_BASE && ip.fromString(argv[1]);
     if (!(by_ip ? client_of(s).connect(ip, (uint16_t)port) : client_of(s).connect(argv[1], (uint16_t)port))) {
         reply_error(io, name);
@@ -841,7 +989,9 @@ static void connect_socket(Stream &io, const char *name, char **argv, long timeo
     reply(io, name, "");
 }
 
-/* AT+CLIENTCONNECTNAME=<sock>,<主机>,<端口> */
+/**
+ * @brief AT+CLIENTCONNECTNAME=<sock>,<host>,<port>.
+ */
 static void cmd_clientconnectname(Stream &io, const char *name, char op, char *args)
 {
     char *argv[3];
@@ -852,6 +1002,9 @@ static void cmd_clientconnectname(Stream &io, const char *name, char op, char *a
     connect_socket(io, name, argv, 0);
 }
 
+/**
+ * @brief Connect a validated TCP or TLS client to an IPv4 address and port.
+ */
 static void cmd_clientconnectip(Stream &io, const char *name, char op, char *args)
 {
     char *argv[3];
@@ -863,7 +1016,10 @@ static void cmd_clientconnectip(Stream &io, const char *name, char op, char *arg
     connect_socket(io, name, argv, 0);
 }
 
-/* AT+CLIENTCONNECT=<sock>,<主机>,<端口>[,<超时毫秒>]；省略时使用官方 3000 ms 默认值 */
+/**
+ * @brief AT+CLIENTCONNECT=<sock>,<host>,<port>[,<timeout-ms>]; omitted timeout uses the
+ * official 3000 ms default.
+ */
 static void cmd_clientconnect(Stream &io, const char *name, char op, char *args)
 {
     char *argv[4];
@@ -881,9 +1037,10 @@ static void cmd_clientconnect(Stream &io, const char *name, char op, char *args)
     connect_socket(io, name, argv, timeout_ms);
 }
 
-/*
- * AT+CLIENTSEND=<sock>,<n> 后紧跟 n 个原始字节。边收边发往 socket；出错也读完 n 字节，保持帧同步。
- * 成功同上游只回裸 "OK"（主机此时不核对前缀）。
+/**
+ * @brief AT+CLIENTSEND=<sock>,<n> is followed by n raw bytes streamed to the socket. Drain all
+ * n even on failure to retain framing. On success reply bare OK, matching the host's
+ * unchecked- prefix path.
  */
 static void cmd_clientsend(Stream &io, const char *name, char op, char *args)
 {
@@ -901,6 +1058,9 @@ static void cmd_clientsend(Stream &io, const char *name, char op, char *args)
     }
 }
 
+/**
+ * @brief Return readable bytes for a validated TCP or TLS client.
+ */
 static void cmd_available(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -911,7 +1071,9 @@ static void cmd_available(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, client_of(s).available());
 }
 
-/* AT+CLIENTRECEIVE=<sock>,<max>：应答见 reply_data */
+/**
+ * @brief AT+CLIENTRECEIVE=<sock>,<max>: see reply_data for response framing.
+ */
 static void cmd_clientreceive(Stream &io, const char *name, char op, char *args)
 {
     char *argv[2];
@@ -936,6 +1098,9 @@ static void cmd_clientreceive(Stream &io, const char *name, char op, char *args)
     reply_data(io, name, got);
 }
 
+/**
+ * @brief Report connection state for a validated TCP or TLS client.
+ */
 static void cmd_clientconnected(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -946,6 +1111,9 @@ static void cmd_clientconnected(Stream &io, const char *name, char op, char *arg
     reply_int(io, name, client_of(s).connected() ? 1 : 0);
 }
 
+/**
+ * @brief Return the WiFiS3-compatible socket state for a validated client.
+ */
 static void cmd_clientstate(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -963,6 +1131,9 @@ static void cmd_clientstate(Stream &io, const char *name, char op, char *args)
     }
 }
 
+/**
+ * @brief Return the local IPv4 address of a validated client socket.
+ */
 static void cmd_ipclient(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -977,6 +1148,9 @@ static void cmd_ipclient(Stream &io, const char *name, char op, char *args)
     }
 }
 
+/**
+ * @brief Report whether the requested client identifier remains connected.
+ */
 static void cmd_clientstatus(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -987,6 +1161,9 @@ static void cmd_clientstatus(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Close a validated client and release its bridge-owned resources.
+ */
 static void cmd_clientclose(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -998,7 +1175,9 @@ static void cmd_clientclose(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
-/* 平台 WiFiClient 的发送不经缓冲，flush 无事可做 */
+/**
+ * @brief Platform WiFiClient sends without buffering, so flush has nothing to drain.
+ */
 static void cmd_flush(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -1010,6 +1189,9 @@ static void cmd_flush(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Return the remote IPv4 address of a validated client socket.
+ */
 static void cmd_remoteip(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -1020,6 +1202,9 @@ static void cmd_remoteip(Stream &io, const char *name, char op, char *args)
     reply(io, name, client_of(s).remoteIP().toString().c_str());
 }
 
+/**
+ * @brief Return the remote port of a validated client socket.
+ */
 static void cmd_remoteport(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -1030,7 +1215,9 @@ static void cmd_remoteport(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, client_of(s).remotePort());
 }
 
-/* 只有 SSL 连接有 PEEK 命令（WiFiS3 的 WiFiClient::peek 只看本地缓冲） */
+/**
+ * @brief Only SSL exposes PEEK commands; WiFiS3 WiFiClient::peek inspects its local buffer.
+ */
 static void cmd_peek(Stream &io, const char *name, char op, char *args)
 {
     int s = op == '=' ? socket_arg(name, args) : -1;
@@ -1041,6 +1228,9 @@ static void cmd_peek(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, client_of(s).peek());
 }
 
+/**
+ * @brief Allocate a free TLS client identifier with independent credential ownership.
+ */
 static void cmd_sslbeginclient(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -1056,11 +1246,20 @@ static void cmd_sslbeginclient(Stream &io, const char *name, char op, char *args
     reply_error(io, name);
 }
 
-/* 把载荷写进定长缓冲，写满即失败 */
+/* Write payload into a fixed buffer; fail on overflow. */
 class BufferSink : public Print {
 public:
+    /**
+     * @brief Wrap a caller-owned bounded buffer as a Print payload sink.
+     */
     BufferSink(uint8_t *buf, size_t cap) : buf_(buf), cap_(cap) {}
+    /**
+     * @brief Write the supplied byte or buffer and return the accepted byte count.
+     */
     size_t write(uint8_t b) override { return write(&b, 1); }
+    /**
+     * @brief Write the supplied byte or buffer and return the accepted byte count.
+     */
     size_t write(const uint8_t *p, size_t n) override
     {
         if (n > cap_ - len_) {
@@ -1077,9 +1276,10 @@ private:
     size_t len_ = 0;
 };
 
-/*
- * AT+SETCAROOT=<sock>：之后的连接用根证书束，回 "+SETCAROOT: " 加 OK。
- * AT+SETCAROOT=<sock>,<n> 后紧跟 n 字节 PEM：之后的连接只信任它；同上游只回裸 "OK"，出错也读完 n 字节
+/**
+ * @brief AT+SETCAROOT=<sock> restores bundled roots for later connections and replies
+ * "+SETCAROOT: " plus OK. With <n>, consume n PEM bytes and trust only them; success is bare
+ * OK. Drain payload even on error.
  */
 static void cmd_setcaroot(Stream &io, const char *name, char op, char *args)
 {
@@ -1110,6 +1310,9 @@ static void cmd_setcaroot(Stream &io, const char *name, char op, char *args)
     io.print("OK\r\n");
 }
 
+/**
+ * @brief Receive a bounded PEM payload and replace the selected credential only on success.
+ */
 static bool store_pem_payload(Stream &io, long size, char **slot)
 {
     if (size <= 0 || size > CA_MAX) {
@@ -1133,6 +1336,9 @@ static bool store_pem_payload(Stream &io, long size, char **slot)
     return true;
 }
 
+/**
+ * @brief Receive and replace the selected TLS client's PEM certificate.
+ */
 static void cmd_sslclientsetcert(Stream &io, const char *name, char op, char *args)
 {
     char *argv[2]; long size;
@@ -1151,6 +1357,9 @@ static void cmd_sslclientsetcert(Stream &io, const char *name, char op, char *ar
     reply(io, name, "");
 }
 
+/**
+ * @brief Receive and replace the selected TLS client's PEM private key.
+ */
 static void cmd_sslclientsetpkey(Stream &io, const char *name, char op, char *args)
 {
     char *argv[2]; long size;
@@ -1169,6 +1378,9 @@ static void cmd_sslclientsetpkey(Stream &io, const char *name, char op, char *ar
     reply(io, name, "");
 }
 
+/**
+ * @brief Allocate a PEM encoding of DER data with the supplied header and footer.
+ */
 static char *der_to_pem(const uint8_t *der, size_t size, const char *header, const char *footer)
 {
     static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1205,7 +1417,10 @@ static char *der_to_pem(const uint8_t *der, size_t size, const char *header, con
     return pem;
 }
 
-/* AT+SETECCSLOT=<sock>,<槽>,<n>：证书用本次载荷，私钥从 littlefs Preferences 的 tls-sse/slotN 读取。 */
+/**
+ * @brief AT+SETECCSLOT=<sock>,<slot>,<n>: use the payload certificate and read its private key
+ * from LittleFS Preferences tls-sse/slotN.
+ */
 static void cmd_seteccslot(Stream &io, const char *name, char op, char *args)
 {
     char *argv[3];
@@ -1262,14 +1477,19 @@ static void cmd_seteccslot(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
-/* 已由 BEGINSERVER 分配的服务端号，否则 -1 */
+/**
+ * @brief Return an allocated server slot, or -1.
+ */
 static int server_arg(const char *s)
 {
     long v;
     return parse_long(s, &v) && v >= 0 && v < MAX_SERVERS && server_allocated[v] ? (int)v : -1;
 }
 
-/* 接入连接的空位；没有时取连接已断且数据读完的位置（先关掉，同上游按 connected() 回收）；都没有时 -1 */
+/**
+ * @brief Find a free accepted-client slot, otherwise close/reuse one whose connection ended
+ * and data was drained, matching upstream connected() reclamation. Return -1 if full.
+ */
 static int free_conn(void)
 {
     for (int i = 0; i < MAX_SOCKETS; i++) {
@@ -1286,7 +1506,9 @@ static int free_conn(void)
     return -1;
 }
 
-/* AT+BEGINSERVER=<端口>：应答服务端号 */
+/**
+ * @brief AT+BEGINSERVER=<port>: return a server identifier.
+ */
 static void cmd_beginserver(Stream &io, const char *name, char op, char *args)
 {
     long port;
@@ -1306,9 +1528,10 @@ static void cmd_beginserver(Stream &io, const char *name, char op, char *args)
     reply_error(io, name);
 }
 
-/*
- * AT+SERVERAVAILABLE=<srv>（WiFiServer::available）：把新连接收进空位，再从上次返回的位置起找一个有数据可读、
- * 未被 SERVERACCEPT 取走的连接，应答其编号；没有时应答 -1（同上游）
+/**
+ * @brief AT+SERVERAVAILABLE=<srv> accepts new clients into free slots, then rotates from the
+ * last result to find a readable client not transferred by SERVERACCEPT. Return its
+ * identifier, or -1 if none, matching upstream.
  */
 static void cmd_serveravailable(Stream &io, const char *name, char op, char *args)
 {
@@ -1338,7 +1561,10 @@ static void cmd_serveravailable(Stream &io, const char *name, char op, char *arg
     reply_int(io, name, -1);
 }
 
-/* AT+SERVERACCEPT=<srv>（WiFiServer::accept）：取一个新连接交给主机，应答其编号；没有时 -1 */
+/**
+ * @brief AT+SERVERACCEPT=<srv> transfers one new client to the host; return its identifier or
+ * -1.
+ */
 static void cmd_serveraccept(Stream &io, const char *name, char op, char *args)
 {
     int v = op == '=' ? server_arg(args) : -1;
@@ -1358,11 +1584,23 @@ static void cmd_serveraccept(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, SERVER_SOCK_BASE + i);
 }
 
-/* SERVERWRITE 的去处：服务端 srv 由 SERVERAVAILABLE 收下、仍连着的连接；返回各连接都写出的字节数 */
+/*
+ * SERVERWRITE targets connected clients retained by SERVERAVAILABLE for srv. Return the minimum
+ * byte count sent to every client.
+ */
 class ServerSink : public Print {
 public:
+    /**
+     * @brief Wrap an allocated server as a Print sink for streamed AT payloads.
+     */
     explicit ServerSink(int srv) : srv_(srv) {}
+    /**
+     * @brief Write the supplied byte or buffer and return the accepted byte count.
+     */
     size_t write(uint8_t b) override { return write(&b, 1); }
+    /**
+     * @brief Write the supplied byte or buffer and return the accepted byte count.
+     */
     size_t write(const uint8_t *buf, size_t n) override
     {
         size_t least = n;
@@ -1379,7 +1617,10 @@ private:
     int srv_;
 };
 
-/* AT+SERVERWRITE=<srv>,<n> 后紧跟 n 个原始字节；同 CLIENTSEND，成功只回裸 "OK" */
+/**
+ * @brief AT+SERVERWRITE=<srv>,<n> is followed by n raw bytes; like CLIENTSEND, success replies
+ * bare OK.
+ */
 static void cmd_serverwrite(Stream &io, const char *name, char op, char *args)
 {
     char *argv[2];
@@ -1397,7 +1638,10 @@ static void cmd_serverwrite(Stream &io, const char *name, char op, char *args)
     }
 }
 
-/* 停止监听；已接入的连接保留，主机照常用 CLIENT* 命令（同上游） */
+/**
+ * @brief Stop listening but retain accepted clients for normal CLIENT* commands, matching
+ * upstream.
+ */
 static void cmd_serverend(Stream &io, const char *name, char op, char *args)
 {
     int v = op == '=' ? server_arg(args) : -1;
@@ -1410,7 +1654,9 @@ static void cmd_serverend(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
-/* AT+UDPBEGIN=<本地端口>[,<本地地址>]：应答 UDP 编号 */
+/**
+ * @brief AT+UDPBEGIN=<local-port>[,<local-address>]: return a UDP identifier.
+ */
 static void udp_begin(Stream &io, const char *name, char op, char *args, bool multicast)
 {
     char *argv[2];
@@ -1436,16 +1682,25 @@ static void udp_begin(Stream &io, const char *name, char op, char *args, bool mu
     reply_error(io, name);
 }
 
+/**
+ * @brief Allocate and bind a plain UDP socket from AT arguments.
+ */
 static void cmd_udpbegin(Stream &io, const char *name, char op, char *args)
 {
     udp_begin(io, name, op, args, false);
 }
 
+/**
+ * @brief Allocate a UDP socket and join the requested multicast group.
+ */
 static void cmd_udpbeginmulti(Stream &io, const char *name, char op, char *args)
 {
     udp_begin(io, name, op, args, true);
 }
 
+/**
+ * @brief Select a retained UDP destination or multicast group for the next packet.
+ */
 static void begin_existing_packet(Stream &io, const char *name, char op, char *args, bool multicast)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1456,17 +1711,26 @@ static void begin_existing_packet(Stream &io, const char *name, char op, char *a
     reply(io, name, "");
 }
 
+/**
+ * @brief Select the UDP socket's retained destination for the next packet.
+ */
 static void cmd_udpbeginpacket(Stream &io, const char *name, char op, char *args)
 {
     begin_existing_packet(io, name, op, args, false);
 }
 
+/**
+ * @brief Select the UDP socket's joined multicast group for the next packet.
+ */
 static void cmd_beginpacketmulti(Stream &io, const char *name, char op, char *args)
 {
     begin_existing_packet(io, name, op, args, true);
 }
 
-/* AT+UDPBEGINPACKETIP=<udp>,<端口>,<地址>、AT+UDPBEGINPACKETADD=<udp>,<端口>,<主机名>（beginPacket(host)） */
+/**
+ * @brief AT+UDPBEGINPACKETIP=<udp>,<port>,<address> and
+ * UDPBEGINPACKETADD=<udp>,<port>,<hostname> select destinations.
+ */
 static void begin_packet(Stream &io, const char *name, char op, char *args, bool by_name)
 {
     char *argv[3];
@@ -1484,17 +1748,26 @@ static void begin_packet(Stream &io, const char *name, char op, char *args, bool
     reply(io, name, "");
 }
 
+/**
+ * @brief Select an explicit IPv4 UDP destination and port.
+ */
 static void cmd_udpbeginpacketip(Stream &io, const char *name, char op, char *args)
 {
     begin_packet(io, name, op, args, false);
 }
 
+/**
+ * @brief Resolve and select a hostname UDP destination and port.
+ */
 static void cmd_udpbeginpacketadd(Stream &io, const char *name, char op, char *args)
 {
     begin_packet(io, name, op, args, true);
 }
 
-/* AT+UDPWRITE=<udp>,<n> 后紧跟 n 个原始字节，追加到当前数据报；同 CLIENTSEND，成功只回裸 "OK" */
+/**
+ * @brief AT+UDPWRITE=<udp>,<n> appends n following raw bytes to the current datagram; like
+ * CLIENTSEND, success replies bare OK.
+ */
 static void cmd_udpwrite(Stream &io, const char *name, char op, char *args)
 {
     char *argv[2];
@@ -1511,6 +1784,9 @@ static void cmd_udpwrite(Stream &io, const char *name, char op, char *args)
     }
 }
 
+/**
+ * @brief Send the buffered UDP datagram and report acceptance.
+ */
 static void cmd_udpendpacket(Stream &io, const char *name, char op, char *args)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1521,6 +1797,9 @@ static void cmd_udpendpacket(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Fetch the next UDP datagram and report its size.
+ */
 static void cmd_udpparse(Stream &io, const char *name, char op, char *args)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1531,6 +1810,9 @@ static void cmd_udpparse(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, udps[u].parsePacket());
 }
 
+/**
+ * @brief Report unread bytes in the selected UDP datagram.
+ */
 static void cmd_udpavailable(Stream &io, const char *name, char op, char *args)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1541,7 +1823,9 @@ static void cmd_udpavailable(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, udps[u].available());
 }
 
-/* AT+UDPREAD=<udp>,<max>：读当前数据报，应答见 reply_data */
+/**
+ * @brief AT+UDPREAD=<udp>,<max> reads the current datagram; see reply_data for framing.
+ */
 static void cmd_udpread(Stream &io, const char *name, char op, char *args)
 {
     char *argv[2];
@@ -1557,7 +1841,9 @@ static void cmd_udpread(Stream &io, const char *name, char op, char *args)
     reply_data(io, name, udps[u].read(data, min(max, (long)sizeof(data))));
 }
 
-/* 下一个字节的值，没有时 -1 */
+/**
+ * @brief Return the next byte, or -1 when none is available.
+ */
 static void cmd_udppeek(Stream &io, const char *name, char op, char *args)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1568,6 +1854,9 @@ static void cmd_udppeek(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, udps[u].peek());
 }
 
+/**
+ * @brief Discard unread bytes in the selected UDP datagram.
+ */
 static void cmd_udpflush(Stream &io, const char *name, char op, char *args)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1579,6 +1868,9 @@ static void cmd_udpflush(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
+/**
+ * @brief Return the most recently received UDP source IPv4 address.
+ */
 static void cmd_udpremoteip(Stream &io, const char *name, char op, char *args)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1589,6 +1881,9 @@ static void cmd_udpremoteip(Stream &io, const char *name, char op, char *args)
     reply(io, name, udps[u].remoteIP().toString().c_str());
 }
 
+/**
+ * @brief Return the most recently received UDP source port.
+ */
 static void cmd_udpremoteport(Stream &io, const char *name, char op, char *args)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1599,6 +1894,9 @@ static void cmd_udpremoteport(Stream &io, const char *name, char op, char *args)
     reply_int(io, name, udps[u].remotePort());
 }
 
+/**
+ * @brief Close a validated UDP socket and release its identifier.
+ */
 static void cmd_udpstop(Stream &io, const char *name, char op, char *args)
 {
     int u = op == '=' ? udp_arg(args) : -1;
@@ -1610,7 +1908,10 @@ static void cmd_udpstop(Stream &io, const char *name, char op, char *args)
     reply(io, name, "");
 }
 
-/* 保留官方 MOUNTFS 形式；本平台挂载失败不自动格式化，包括 format_on_fault=1。 */
+/**
+ * @brief Retain official MOUNTFS syntax but never format automatically on mount failure,
+ * including format_on_fault=1.
+ */
 static void cmd_mountfs(Stream &io, const char *name, char op, char *args)
 {
     long flag;
@@ -1621,7 +1922,10 @@ static void cmd_mountfs(Stream &io, const char *name, char op, char *args)
     reply(io, name, "FS Mounted\r\n");
 }
 
-/* PREF 数字结果按固定上游保留额外空行；数值0是begin/写/删/clear的失败结果。 */
+/**
+ * @brief Preserve the upstream extra blank line for numeric PREF results. Zero indicates
+ * begin/write/delete/clear failure.
+ */
 static void pref_number(Stream &io, const char *name, uint64_t value)
 {
     char result[24];
@@ -1629,12 +1933,21 @@ static void pref_number(Stream &io, const char *name, uint64_t value)
     reply(io, name, result);
 }
 
+/**
+ * @brief Validate a Preferences key using the bridge's bounded name rules.
+ */
 static bool pref_name(const char *key) { return key && *key && strlen(key) <= 15; }
+/**
+ * @brief Report whether a Preferences read failed for a reason requiring an AT error.
+ */
 static bool pref_default_error() {
     int e = preferences.lastError();
     return e == 0 || e == LFS_ERR_NOENT || e == LFS_ERR_INVAL;
 }
 
+/**
+ * @brief Open a validated Preferences namespace with the requested read-only policy.
+ */
 static void cmd_prefbegin(Stream &io, const char *name, char op, char *args)
 {
     char *argv[4]; long readOnly;
@@ -1646,6 +1959,9 @@ static void cmd_prefbegin(Stream &io, const char *name, char op, char *args)
     pref_number(io, name, preferences.begin(argv[0], readOnly, argv[2]));
 }
 
+/**
+ * @brief Handle Preferences end, clear and remaining-entry queries.
+ */
 static void cmd_prefcontrol(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -1657,6 +1973,9 @@ static void cmd_prefcontrol(Stream &io, const char *name, char op, char *args)
     else pref_number(io, name, n);
 }
 
+/**
+ * @brief Handle Preferences remove, type and blob-length operations for one key.
+ */
 static void cmd_prefkey(Stream &io, const char *name, char op, char *args)
 {
     if (op != '=' || !pref_name(args) || strchr(args, ',')) { reply_error(io, name); return; }
@@ -1666,6 +1985,9 @@ static void cmd_prefkey(Stream &io, const char *name, char op, char *args)
     else pref_number(io, name, value);
 }
 
+/**
+ * @brief Parse a Preferences integer while checking the selected type's signedness and range.
+ */
 static bool pref_integer(const char *text, long type, int64_t &signedValue, uint64_t &unsignedValue)
 {
     bool negative = *text == '-';
@@ -1687,6 +2009,9 @@ static bool pref_integer(const char *text, long type, int64_t &signedValue, uint
     return true;
 }
 
+/**
+ * @brief Validate and store a typed Preferences value from AT arguments.
+ */
 static void cmd_prefput(Stream &io, const char *name, char op, char *args)
 {
     char *argv[4]; long type;
@@ -1725,6 +2050,9 @@ static void cmd_prefput(Stream &io, const char *name, char op, char *args)
     pref_number(io, name, n);
 }
 
+/**
+ * @brief Read a typed Preferences value or validated fallback into the AT response.
+ */
 static void cmd_prefget(Stream &io, const char *name, char op, char *args)
 {
     char *argv[4]; long type;
@@ -1763,7 +2091,10 @@ static void cmd_prefget(Stream &io, const char *name, char op, char *args)
     else { char result[24]; snprintf(result, sizeof(result), "%" PRId64 "\r\n", s); reply(io, name, result); }
 }
 
-/* 官方 FS=0,op,path[,size|,offset,length]。写帧即使失败也消费已声明的载荷。 */
+/**
+ * @brief Official FS=0,op,path[,size|,offset,length]. Consume the declared write payload even
+ * if the operation fails.
+ */
 static void cmd_fs(Stream &io, const char *name, char op, char *args)
 {
     if (op != '=') {
@@ -1789,7 +2120,10 @@ static void cmd_fs(Stream &io, const char *name, char op, char *args)
             reply_error(io, name);
             return;
         }
-        /* Flash 操作会暂时屏蔽中断；先收完整帧，避免写入时丢失仍在传输的 UART 载荷。 */
+        /*
+ * Flash operations briefly mask interrupts. Receive the full frame first to avoid losing UART
+ * payload still arriving during writes.
+ */
         if (io.readBytes(data, length) != (size_t)length) {
             reply_error(io, name);
             return;
@@ -1832,8 +2166,10 @@ static void cmd_fs(Stream &io, const char *name, char op, char *args)
     io.print("\r\nOK\r\n");
 }
 
-/* AT+RESTARTBOOTLOADER：BL616CL 复位进 ROM 下载模式，供更新本固件。上游直接复位、不应答，主机要等满超时；
-   这里先回 OK 并等它发完 */
+/**
+ * @brief AT+RESTARTBOOTLOADER resets BL616CL into ROM for firmware update. Upstream resets
+ * without replying, forcing a host timeout; acknowledge and drain output first here.
+ */
 static void cmd_restartbootloader(Stream &io, const char *name, char op, char *args)
 {
     (void)args;
@@ -1910,7 +2246,7 @@ static const struct {
     { "+REMOTEPORT", cmd_remoteport },
     { "+IPCLIENT", cmd_ipclient },
     { "+PEEK", cmd_peek },
-    /* TLS：除 SSLBEGINCLIENT、SETCAROOT、SETECCSLOT、SSLPEEK 外与 TCP 客户端共用处理函数 */
+    /* TLS shares TCP client handlers except SSLBEGINCLIENT, SETCAROOT, SETECCSLOT and SSLPEEK. */
     { "+SSLBEGINCLIENT", cmd_sslbeginclient },
     { "+SETCAROOT", cmd_setcaroot },
     { "+SETECCSLOT", cmd_seteccslot },
@@ -1955,7 +2291,10 @@ static const struct {
     { "+RESTARTBOOTLOADER", cmd_restartbootloader },
 };
 
-/* 一行请求："AT"、"AT+NAME"、"AT+NAME?"、"AT+NAME=args"；不以 "AT" 开头的行忽略 */
+/**
+ * @brief Accepted request forms: AT, AT+NAME, AT+NAME? and AT+NAME=args. Ignore lines not
+ * starting with AT.
+ */
 static void dispatch(Stream &io, char *s)
 {
     if (strncmp(s, "AT", 2) != 0) {
@@ -1982,6 +2321,10 @@ static void dispatch(Stream &io, char *s)
     reply_error(io, s);
 }
 
+/**
+ * @brief Consume available AT input and dispatch complete bounded lines without waiting for a
+ * new line.
+ */
 void at_serve(Stream &io)
 {
     while (io.available() > 0) {
@@ -1999,7 +2342,7 @@ void at_serve(Stream &io)
         } else if (line_len < LINE_MAX) {
             line[line_len++] = (char)c;
         } else {
-            line_overflow = true; /* 过长的行整行丢弃 */
+            line_overflow = true; /* Discard an overlong line completely. */
         }
     }
 }

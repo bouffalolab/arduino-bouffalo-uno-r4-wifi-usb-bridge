@@ -16,6 +16,7 @@ CHECKS = 0
 
 
 def read_until(sock, token=b"OK\r\n", timeout=5):
+    """Read a bounded host-test response through the requested terminator."""
     sock.settimeout(0.2)
     data = b""
     end = time.monotonic() + timeout
@@ -30,6 +31,7 @@ def read_until(sock, token=b"OK\r\n", timeout=5):
 
 
 def call(sock, command, expected=b"OK\r\n"):
+    """Send an AT command and verify its complete host-test response."""
     global CHECKS
     sock.sendall(command.encode() + b"\r\n")
     data = read_until(sock, expected)
@@ -41,6 +43,7 @@ def call(sock, command, expected=b"OK\r\n"):
 
 
 def payload_call(sock, command, payload):
+    """Send a length-delimited AT command and raw test payload."""
     global CHECKS
     sock.sendall(command.encode() + b"\r\n" + payload)
     data = read_until(sock)
@@ -51,6 +54,7 @@ def payload_call(sock, command, payload):
 
 
 def echo_server(listener):
+    """Accept and echo TCP data for the host TLS/client test."""
     while True:
         try:
             conn, _ = listener.accept()
@@ -68,6 +72,7 @@ def echo_server(listener):
 
 
 def main():
+    """Parse options and run the tcp tls check validation or packaging command."""
     global CHECKS
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

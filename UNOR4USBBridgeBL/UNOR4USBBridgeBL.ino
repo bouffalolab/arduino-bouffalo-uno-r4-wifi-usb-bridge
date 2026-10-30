@@ -1,47 +1,50 @@
-// BL 版 UNO R4 WiFi USB bridge（BL616CL 替代 ESP32-S3）。
-// 当前功能：
-// - 电脑看到的 USB 串口（Serial）与 RA4M1 用户串口（Serial1，uart0 GPIO34/35 经 U4 接 SCI9）双向透传；
-// - RA4M1 WiFiS3 的 AT 命令（Serial2，uart1 GPIO6/7 经 U4 接 SCI1）：联网与 TCP 客户端，见 at_server.h。
-// 电脑设置的波特率按官方 bridge 语义处理：
-// - 1200：MD 高，RESET 双击，RA4M1 进 Arduino bootloader（IDE/arduino-cli 经 bossac 上传）；
-// - 2400：MD 低，RESET 一次，RA4M1 进 ROM 下载模式；MD 保持低，直到下一次 1200；
-// - 其他：设为 Serial1 的波特率（帧格式固定 8N1）。
-// 每次处理后清空 RA4M1 发来、尚未转发的数据。1200 由本固件处理，所以关闭 Core 的 1200 bps touch。
-// 构建：arduino-bl 平台，FQBN bouffalolab:bl:unor4wifi_bl616cl；1V1 模组加 -DBRIDGE_MODULE_1V1。
+// UNO R4 WiFi USB bridge with BL616CL replacing ESP32-S3.
+// Implemented functions:
+// - Bidirectional USB Serial to RA4M1 Serial1 passthrough; uart0 GPIO34/35 connects through U4 to SCI9.
+// - WiFiS3 AT over Serial2 (uart1 GPIO6/7 through U4 to SCI1); see at_server.h for network and other commands.
+// Handle host baud changes using the official bridge semantics:
+// - 1200: MD high and a double RESET pulse enter the RA4M1 Arduino bootloader for bossac upload.
+// - 2400: MD low and one RESET pulse enter RA4M1 ROM; keep MD low until a later 1200 request.
+// - Other rates configure Serial1 with fixed 8N1 framing.
+// After each switch, discard RA4M1 bytes not yet forwarded. Disable Core touch reset because this bridge handles 1200 bps itself.
+// Build with bouffalolab:bl:unor4wifi_bl616cl; -DBRIDGE_MODULE_1V1 selects the alternate module wiring, which remains unvalidated.
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include "at_server.h"
 #include "dap_bridge.h"
 
-#define PIN_RA4M1_RESET 3 // ESP_IO4，经 U4 接 RA4M1 RESET
+#define PIN_RA4M1_RESET 3 // ESP_IO4, connected through U4 to RA4M1 RESET.
 #if defined(BRIDGE_MODULE_1V1)
 #define PIN_RA4M1_MD 10
 #else
-#define PIN_RA4M1_MD 14 // 1V0 模组；ESP_IO9，经 U4 接 RA4M1 MD（板上无上拉）
+#define PIN_RA4M1_MD 14 // 1V0 module; ESP_IO9 through U4 to RA4M1 MD, without a board pull-up.
 #endif
 
 #define RESET_PULSE_MS 100
 #define BAUD_BOOTLOADER 1200
 #define BAUD_ROM 2400
-#define USER_RX_BUFFER 8192 // USB 写最多阻塞 100 ms，921600 下约 9 KB
-#define AT_BAUD 115200      // WiFiS3 Modem：Serial2 115200 8N1
-#define AT_RX_BUFFER 8192   // CLIENTSEND 载荷在发往 socket 期间缓存在这里（同上游）
-#define AT_TASK_STACK_SIZE 8192 // 字节
-#define AT_TASK_PRIORITY 1      // 同 Core 的 loop 任务，两者轮流运行
+#define USER_RX_BUFFER 8192 // USB writes can stall for 100 ms, about 9 KB at 921600 baud.
+#define AT_BAUD 115200      // WiFiS3 Modem: Serial2 at 115200 8N1.
+#define AT_RX_BUFFER 8192   // Buffer CLIENTSEND payloads while forwarding to the socket, matching upstream.
+#define AT_TASK_STACK_SIZE 8192 // Bytes.
+#define AT_TASK_PRIORITY 1      // Same priority as the Core loop task, allowing both tasks to run.
 
 static uint8_t buf[1024];
 
-// 回调只通知，线路切换与 DAP 都在 loop 执行，串行访问 RESET/SWD。
+// The callback only notifies; loop serializes line switching and DAP access to RESET/SWD.
 static uint32_t user_baud;
 static volatile uint32_t line_events;
-// 只在 loop 中使用
+// Used only by loop.
 static uint32_t handled_baud;
-// 只在 loop 中使用
+// Used only by loop.
 static uint32_t seen_events;
 static uint32_t applied_baud;
 
-// AT 命令在单独的任务中处理：连接、DNS 等可能等待数秒，不能停住 loop 中的透传。Wi-Fi 调用只在这个任务中
+/**
+ * @brief Handle AT in a separate task because connection/DNS calls can wait seconds and must
+ * not stop passthrough. All Wi-Fi calls run in that task.
+ */
 static void atTask(void *arg)
 {
     (void)arg;
@@ -51,6 +54,9 @@ static void atTask(void *arg)
     }
 }
 
+/**
+ * @brief Pulse the RA4M1 reset line for the bridge's serial-upload sequence.
+ */
 static void resetPulse()
 {
     digitalWrite(PIN_RA4M1_RESET, LOW);
@@ -58,13 +64,19 @@ static void resetPulse()
     digitalWrite(PIN_RA4M1_RESET, HIGH);
 }
 
-// Core 在每个 SET_LINE_CODING、SET_CONTROL_LINE_STATE 之后调用；只按波特率变化动作，
-// 控制线变化和重复设置同一波特率不处理（Linux 只在值变化时发 SET_LINE_CODING）。
+/**
+ * @brief Core invokes this callback after each line/control request. Act only on baud changes.
+ * Ignore control-only changes and repeated rates; Linux emits SET_LINE_CODING only when its
+ * value changes.
+ */
 static void onLineChange()
 {
     line_events = line_events + 1;
 }
 
+/**
+ * @brief Apply host CDC line settings to the RA UART and bridge reset policy.
+ */
 static void applyLineChange()
 {
     uint32_t baud = Serial.baud();
@@ -88,6 +100,9 @@ static void applyLineChange()
     }
 }
 
+/**
+ * @brief Initialize the bridge peripherals and protocol services.
+ */
 void setup()
 {
     digitalWrite(PIN_RA4M1_MD, HIGH);
@@ -96,13 +111,13 @@ void setup()
     pinMode(PIN_RA4M1_RESET, OUTPUT);
     dap_bridge_begin();
 
-    // Core 在 setup() 之前才启动 USB，主机的线路请求在注册回调之后到达；此前是 Core 的默认值
+    // Core starts USB just before setup, so host line requests arrive after callback registration; earlier values are Core defaults.
     handled_baud = Serial.baud();
     user_baud = applied_baud = handled_baud;
     Serial1.setRxBufferSize(USER_RX_BUFFER);
     Serial1.begin(applied_baud);
     if (Serial.onLineChange(onLineChange)) {
-        Serial.setTouchReset(false); // 回调不可用时保留 touch，仍能经 USB 更新本固件
+        Serial.setTouchReset(false); // Keep touch enabled when callback registration fails, preserving USB firmware recovery.
     }
 
     Serial2.setRxBufferSize(AT_RX_BUFFER);
@@ -110,9 +125,12 @@ void setup()
     xTaskCreate(atTask, "at", AT_TASK_STACK_SIZE / sizeof(StackType_t), NULL, AT_TASK_PRIORITY, NULL);
 }
 
+/**
+ * @brief Service USB, RA UART and AT traffic in the bridge task.
+ */
 void loop()
 {
-    // 改波特率在 loop 中做：Serial1 的收发也只在这里，不与 begin() 并发
+    // Reconfigure Serial1 in loop, which also owns its reads/writes, avoiding concurrent begin().
     if (line_events != seen_events) {
         seen_events = line_events;
         applyLineChange();
@@ -127,8 +145,8 @@ void loop()
 
     dap_bridge_poll();
 
-    // 只取 Serial1 发送 FIFO 放得下的量：write() 在 FIFO 满时等待，921600 下写 1 KB 约 11 ms，
-    // 期间 RA4M1 发来的数据会积压到超出接收缓冲（实测双向同时 64 KB 丢约 1.4 KB）
+    // Read only enough USB bytes to fit the Serial1 TX FIFO. Blocking a 1 KiB write at 921600 baud takes about 11 ms.
+    // During that wait RA4M1 RX can overflow; simultaneous 64 KiB traffic lost about 1.4 KiB in the original measurement.
     int n = min(Serial.available(), Serial1.availableForWrite());
     if (n > 0) {
         n = Serial.readBytes(buf, n);

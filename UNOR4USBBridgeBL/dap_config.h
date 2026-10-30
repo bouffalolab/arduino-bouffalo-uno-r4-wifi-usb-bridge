@@ -29,37 +29,91 @@
 
 static struct bflb_device_s *dap_gpio;
 
+/**
+ * @brief Set the selected bridge GPIO output level.
+ */
 static inline void dap_pin_write(uint8_t pin, int value)
 {
     if (value) bflb_gpio_set(dap_gpio, pin);
     else bflb_gpio_reset(dap_gpio, pin);
 }
 
+/**
+ * @brief Drive the SWD clock output to the requested level.
+ */
 static inline void DAP_CONFIG_SWCLK_TCK_write(int v) { dap_pin_write(DAP_SWCLK, v); }
+/**
+ * @brief Drive the SWD data output to the requested level.
+ */
 static inline void DAP_CONFIG_SWDIO_TMS_write(int v) { dap_pin_write(DAP_SWDIO, v); }
+/**
+ * @brief Drive the RA4M1 active-low reset output.
+ */
 static inline void DAP_CONFIG_nRESET_write(int v) { dap_pin_write(DAP_RESET, v); }
+/**
+ * @brief Drive the SWD clock output high.
+ */
 static inline void DAP_CONFIG_SWCLK_TCK_set(void) { DAP_CONFIG_SWCLK_TCK_write(1); }
+/**
+ * @brief Drive the SWD clock output low.
+ */
 static inline void DAP_CONFIG_SWCLK_TCK_clr(void) { DAP_CONFIG_SWCLK_TCK_write(0); }
+/**
+ * @brief Read the physical SWD clock level.
+ */
 static inline int DAP_CONFIG_SWCLK_TCK_read(void) { return bflb_gpio_read(dap_gpio, DAP_SWCLK); }
+/**
+ * @brief Read the physical SWD data level.
+ */
 static inline int DAP_CONFIG_SWDIO_TMS_read(void) { return bflb_gpio_read(dap_gpio, DAP_SWDIO); }
+/**
+ * @brief Read the physical target reset level.
+ */
 static inline int DAP_CONFIG_nRESET_read(void) { return bflb_gpio_read(dap_gpio, DAP_RESET); }
+/**
+ * @brief Ignore this unsupported JTAG output in the SWD-only port.
+ */
 static inline void DAP_CONFIG_TDI_write(int v) { (void)v; }
+/**
+ * @brief Ignore this unsupported JTAG reset output in the SWD-only port.
+ */
 static inline void DAP_CONFIG_nTRST_write(int v) { (void)v; }
+/**
+ * @brief Return the unused JTAG input value for this SWD-only port.
+ */
 static inline int DAP_CONFIG_TDI_read(void) { return 0; }
+/**
+ * @brief Return the unused JTAG output value for this SWD-only port.
+ */
 static inline int DAP_CONFIG_TDO_read(void) { return 0; }
+/**
+ * @brief Return the unused JTAG reset value for this SWD-only port.
+ */
 static inline int DAP_CONFIG_nTRST_read(void) { return 0; }
+/**
+ * @brief Ignore the optional Free-DAP status LED request on this board.
+ */
 static inline void DAP_CONFIG_LED(int i, int state) { (void)i; (void)state; }
 
+/**
+ * @brief Release SWDIO as a floating Schmitt-trigger input.
+ */
 static inline void DAP_CONFIG_SWDIO_TMS_in(void)
 {
     bflb_gpio_init(dap_gpio, DAP_SWDIO, GPIO_INPUT | GPIO_FLOAT | GPIO_SMT_EN);
 }
 
+/**
+ * @brief Enable SWDIO input and output for driven transfers.
+ */
 static inline void DAP_CONFIG_SWDIO_TMS_out(void)
 {
     bflb_gpio_init(dap_gpio, DAP_SWDIO, GPIO_INPUT | GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_1);
 }
 
+/**
+ * @brief Release SWD pins and deassert reset while keeping reset as a bridge-owned output.
+ */
 static inline void DAP_CONFIG_DISCONNECT(void)
 {
     bflb_gpio_init(dap_gpio, DAP_SWCLK, GPIO_INPUT | GPIO_FLOAT | GPIO_SMT_EN);
@@ -68,6 +122,9 @@ static inline void DAP_CONFIG_DISCONNECT(void)
     DAP_CONFIG_nRESET_write(1);
 }
 
+/**
+ * @brief Resolve GPIO resources and release retained SWD pin state.
+ */
 static inline void DAP_CONFIG_SETUP(void)
 {
     dap_gpio = bflb_device_get_by_name("gpio");
@@ -76,6 +133,9 @@ static inline void DAP_CONFIG_SETUP(void)
     DAP_CONFIG_DISCONNECT();
 }
 
+/**
+ * @brief Configure and idle the SWD pins before connecting to the RA4M1 target.
+ */
 static inline void DAP_CONFIG_CONNECT_SWD(void)
 {
     bflb_gpio_init(dap_gpio, DAP_SWCLK, GPIO_INPUT | GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_1);
@@ -85,6 +145,9 @@ static inline void DAP_CONFIG_CONNECT_SWD(void)
     DAP_CONFIG_nRESET_write(1);
 }
 
+/**
+ * @brief Assert target reset for one millisecond and then release it.
+ */
 static inline void bridge_dap_target_reset(void)
 {
     DAP_CONFIG_nRESET_write(0);
@@ -93,8 +156,9 @@ static inline void bridge_dap_target_reset(void)
 }
 #define DAP_CONFIG_RESET_TARGET_FN bridge_dap_target_reset
 
-/* One delay unit is 1 us at this platform's fixed 320 MHz CPU clock.
- * GPIO access and interrupts can lengthen the requested SWCLK period.
+/**
+ * @brief One delay unit is 1 us at this platform's fixed 320 MHz CPU clock. GPIO access and
+ * interrupts can lengthen the requested SWCLK period.
  */
 static inline void DAP_CONFIG_DELAY(uint32_t units)
 {

@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""主机侧 AT 对接测试：未修改的 WiFiS3（RA4M1 侧）对 bridge 的 at_server 加平台 WiFi 库（BL616CL 侧）。
+"""Host AT integration checks between unmodified WiFiS3 and bridge at_server/platform WiFi.
 
-  run.py --renesas <renesas_uno 包目录> [--platform <arduino-bl 仓库>] [--build <编译目录>]
-
---renesas 是安装好的 arduino:renesas_uno 包目录（含 libraries/WiFiS3/src 与 cores/arduino），WiFiS3 源码直接从这里编译，
-不复制进本仓库。--platform 默认是本仓库旁边的 arduino-bl：取 ArduinoCore-API（cores/bouffalo/api）与 libraries/WiFi。
-平台 WiFi 库的 wifi_port、net_port 换成 bl/ 下的主机实现：虚拟 AP、本机 POSIX socket。
-
-两个程序经 socketpair 相连，本脚本另在 127.0.0.1 起回显服务与关闭服务（发 "bye\\n" 后关闭），以及 UDP 回显服务。ra_host 逐项输出结果，
-本脚本判定；BL 侧进程必须运行到最后一条 AT+RESTARTBOOTLOADER，由 resetToBootloader 的替身打印标记后退出。另以 bl_host --early-client 单独检查平台 WiFiClient 在 Wi-Fi 初始化前的连接。
-退出码 0 表示全部通过。
+--renesas selects an installed Renesas package; compile its WiFiS3 directly without
+vendoring. --platform defaults to the sibling arduino-bl for Core-API and WiFi.
+Substitute wifi/net/TLS ports with a virtual AP, local POSIX sockets and plaintext TLS.
+Connect endpoints through socketpair; provide local TCP echo/close and UDP services.
+Validate printed results and require the final ROM-restart marker/exit. Separately test
+early WiFiClient connections before initialization. Exit zero only when every check
+passes. No real radio, TLS cryptography or board Flash is tested.
 """
 import argparse
 import os
@@ -24,14 +22,14 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 BRIDGE = os.path.normpath(os.path.join(HERE, "../.."))
 SSID = "testnet"
-PASS = "pa,ss wo,rd"  # 含逗号与空格：BEGINSTA 以第一个逗号分开网络名与密码
+PASS = "pa,ss wo,rd"  # Include commas/spaces: BEGINSTA splits SSID from passphrase at the first comma only.
 API_SOURCES = ("String.cpp", "Print.cpp", "Stream.cpp", "IPAddress.cpp", "Common.cpp")
 WIFIS3_SOURCES = ("Modem.cpp", "WiFi.cpp", "WiFiClient.cpp", "WiFiServer.cpp", "WiFiUdp.cpp", "WiFiSSLClient.cpp",
                   "StringHelpers.cpp")
 
 results = []
 
-# 与 bl/fake_wifi_port.c 的 scan_table 相同：(ssid, bssid, rssi, 信道, wl_enc_type)。第 11 个超出 10 个的上限
+# Match fake_wifi_port.c scan_table tuples: SSID, BSSID, RSSI, channel and encryption. Entry eleven exceeds the ten-result limit.
 SCAN_TABLE = [
     ("testnet", "02:00:00:00:00:AA", -42, 6, 2),
     ("open net", "02:00:00:00:01:02", -50, 1, 5),
@@ -48,23 +46,25 @@ SCAN_TABLE = [
 
 
 def check(name, ok):
+    """Host-only fixture: validate the selected artifact or fixture and raise an error on a failed invariant."""
     results.append((name, ok))
     print("%s: %s" % (name, "PASS" if ok else "FAIL"), flush=True)
     return ok
 
 
 def compile_all(out, sources, includes, defines=()):
+    """Compile fixture sources with explicit includes and defines, returning object paths."""
     objs = []
     for src in sources:
         obj = os.path.join(out, "%d-%s.o" % (len(objs), os.path.basename(src)))
         c = src.endswith(".c") or src.endswith(".impl")
         std = "-std=gnu11" if c else "-std=gnu++17"
         if src.endswith("WiFiS3/src/WiFiSSLClient.cpp"):
-            # 该文件 using namespace std，主机 g++ 13 下 std::byte 与 Arduino 的 byte 冲突；它不用 C++17 特性
+            # This file imports std names, so GCC13 std::byte conflicts with Arduino byte; it needs no C++17 features.
             std = "-std=gnu++14"
         cmd = ["gcc" if c else "g++", "-c", "-g", "-O1", "-Wall", std]
         cmd += ["-x", "c"] if src.endswith(".impl") else []
-        cmd += [] if c else ["-include", "stdlib.h"]  # api/Common.h 声明的 atexit 不带 noexcept，先让 glibc 的声明生效
+        cmd += [] if c else ["-include", "stdlib.h"]  # Let glibc declare atexit first because api/Common.h omits noexcept.
         cmd += ["-I" + i for i in includes] + ["-D" + d for d in defines] + [src, "-o", obj]
         subprocess.run(cmd, check=True)
         objs.append(obj)
@@ -72,10 +72,11 @@ def compile_all(out, sources, includes, defines=()):
 
 
 def build(args, out):
+    """Build the separate RA and BL host-test executables."""
     api = os.path.join(args.platform, "cores/bouffalo")
     wifi = os.path.join(args.platform, "libraries/WiFi/src")
     wifis3 = os.path.join(args.renesas, "libraries/WiFiS3/src")
-    renesas_inc = os.path.join(out, "renesas")  # 只取 FifoBuffer.h，不让 renesas 的 Arduino.h 进入搜索路径
+    renesas_inc = os.path.join(out, "renesas")  # Include only FifoBuffer.h; do not expose the Renesas Arduino.h search path.
     os.makedirs(renesas_inc, exist_ok=True)
     shutil.copy(os.path.join(args.renesas, "cores/arduino/FifoBuffer.h"), renesas_inc)
     host = os.path.join(HERE, "host")
@@ -106,10 +107,13 @@ def build(args, out):
 
 
 class Servers:
-    """回显服务记录每条连接收到的字节；关闭服务发 "bye\\n" 后关闭。
-    UDP 回显服务把数据报原样发回来源并记录长度；收到 b"push" 时改从另一个 socket 发 b"pushed"（端口为 push_port）"""
+    """Record bytes received by TCP echo; close service sends bye then disconnects. UDP
+
+    echoes and logs lengths; push triggers pushed from a second socket using push_port.
+    """
 
     def __init__(self):
+        """Initialize the isolated host-test fixture and its owned resources."""
         self.received = []
         self.echo = self._listen(self._echo)
         self.close = self._listen(self._close)
@@ -123,12 +127,14 @@ class Servers:
         threading.Thread(target=self._udp_echo, daemon=True).start()
 
     def _udp_echo(self):
+        """Echo datagrams received by the host-test peer."""
         while True:
             data, addr = self.udp.recvfrom(65536)
             self.udp_lens.append(len(data))
             (self.push if data == b"push" else self.udp).sendto(b"pushed" if data == b"push" else data, addr)
 
     def _listen(self, handler):
+        """Create a host-test TCP listener and start its accept loop."""
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         s.listen(16)
@@ -136,11 +142,13 @@ class Servers:
         return s.getsockname()[1]
 
     def _accept(self, s, handler):
+        """Accept test connections and dispatch each to the selected handler."""
         while True:
             conn, _ = s.accept()
             threading.Thread(target=handler, args=(conn,), daemon=True).start()
 
     def _echo(self, conn):
+        """Echo data received on a host-test TCP connection."""
         data = b""
         conn.settimeout(30)
         try:
@@ -156,11 +164,13 @@ class Servers:
         self.received.append(data)
 
     def _close(self, conn):
+        """Close a host-test connection after its configured delay."""
         conn.sendall(b"bye\n")
         conn.close()
 
 
 def free_port(kind=socket.SOCK_STREAM):
+    """Ask the host OS for an unused local test port."""
     s = socket.socket(socket.AF_INET, kind)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -169,9 +179,13 @@ def free_port(kind=socket.SOCK_STREAM):
 
 
 def server_peer(port, log):
-    """按 ra_main.cpp server_tests 的顺序当客户端，每步等到应答再走下一步；结果记进 log"""
+    """Act as the client in ra_main.cpp server_tests order, waiting for each response
+
+    before proceeding and recording results in log.
+    """
 
     def connect(timeout=20):
+        """Establish a bounded connection to the supplied address or hostname; report failure when no network is usable."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             try:
@@ -181,6 +195,7 @@ def server_peer(port, log):
         raise TimeoutError("connect %d" % port)
 
     def line(s):
+        """Print a tagged test result and its numeric fields."""
         buf = b""
         while not buf.endswith(b"\n"):
             ch = s.recv(1)
@@ -190,7 +205,7 @@ def server_peer(port, log):
         return buf
 
     try:
-        a = connect(150)  # ra 跑完前面各项才 begin
+        a = connect(150)  # Wait until RA reaches begin after its earlier checks.
         a.sendall(b"hello\n")
         log["chat"] = [line(a)]
         a.sendall(b"again\n")
@@ -224,6 +239,7 @@ def server_peer(port, log):
 
 
 def fields(lines, item):
+    """Extract tagged result fields from the host-test output."""
     for ln in lines:
         parts = ln.split(" ")
         if parts[0] == item:
@@ -232,6 +248,7 @@ def fields(lines, item):
 
 
 def nums(lines, item):
+    """Parse tagged numeric result fields from the host-test output."""
     try:
         return [int(x) for x in fields(lines, item)]
     except (TypeError, ValueError):
@@ -239,10 +256,12 @@ def nums(lines, item):
 
 
 def payload(n):
+    """Create a deterministic binary payload of the requested length."""
     return bytes((i * 31 + n) & 0xFF for i in range(n))
 
 
 def main():
+    """Parse options and run the run validation or packaging command."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--renesas", required=True)
     ap.add_argument("--platform", default=os.path.normpath(os.path.join(BRIDGE, "../arduino-bl")))
@@ -257,7 +276,7 @@ def main():
     check("平台 WiFiClient 在 Wi-Fi 初始化前连接直接失败、不调用 net_port（rc=%d，%s）"
           % (early.returncode, early.stdout.strip()), early.returncode == 0 and early.stdout.strip() == "EARLYCLIENT 0 0")
 
-    udp_local = free_port(socket.SOCK_DGRAM)  # 给 BL 侧绑定的本机 UDP 端口
+    udp_local = free_port(socket.SOCK_DGRAM)  # Local UDP port bound by the BL endpoint.
     server_ports = [free_port() for _ in range(6)]
     peer = {}
     peer_thread = threading.Thread(target=server_peer, args=(server_ports[0], peer), daemon=True)

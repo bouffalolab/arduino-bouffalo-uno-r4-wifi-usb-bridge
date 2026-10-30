@@ -1,3 +1,3 @@
 #pragma once
-/* WiFiS3 按 renesas core 的路径包含 ArduinoCore-API 头 */
+/* Expose ArduinoCore-API at the Renesas include path used by WiFiS3. */
 #include "api/Udp.h"
