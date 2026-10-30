@@ -338,7 +338,7 @@ def main():
     check("TLS 按地址连接时根证书束不认，连接失败（%s）" % v("SSLUNTRUSTED"), n("SSLUNTRUSTED") == [0])
     check("setCACert 的 PEM 逐字节传到平台，连接成功、100 字节回显一致（%s）" % v("SSLCA"), n("SSLCA") == [1, 100, 100, 1])
     check("错误的 CA 连接失败；setCACert(nullptr) 后恢复用根证书束（%s）" % v("SSLCAFLOW"), n("SSLCAFLOW") == [0, 1])
-    check("setEccSlot 后连接失败（无安全芯片），载荷读完、之后带超时的连接正常（%s %s）" % (v("SSLECC"), v("SSLTIMEOUT")),
+    check("setEccSlot 未预置私钥槽时失败，载荷读完、之后带超时的连接正常（%s %s）" % (v("SSLECC"), v("SSLTIMEOUT")),
           n("SSLECC") == [0] and n("SSLTIMEOUT") == [1, 1, 1, 1])
     check("TLS 对端关闭后读完数据、connected() 为 0（%s）" % v("SSLPEERCLOSE"), n("SSLPEERCLOSE") == [1, 4, 0])
     check("SSL 编号不能用于 CLIENT 命令，TCP 编号不能用于 SSL 命令（%s）" % v("SSLMIX"), n("SSLMIX") == [1, 0, 0])

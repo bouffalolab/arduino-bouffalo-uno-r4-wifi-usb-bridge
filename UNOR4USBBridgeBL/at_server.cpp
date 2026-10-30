@@ -869,7 +869,7 @@ static void cmd_clientconnect(Stream &io, const char *name, char op, char *args)
     char *argv[4];
     long timeout_ms;
     int n = op == '=' ? split(args, argv, 4) : 0;
-    if (n < 3 || n > 4) {
+    if (n < 3 || n > 4 || (n == 4 && argv[3][0] == '\0')) {
         reply_error(io, name);
         return;
     }
