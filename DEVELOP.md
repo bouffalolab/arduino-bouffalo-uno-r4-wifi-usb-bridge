@@ -24,7 +24,7 @@ General Arduino UART/USB/network/storage functionality belongs to the [platform]
 - USB serial/HID access and the relevant physical network or BLE peer.
 - Optional OpenOCD or pyOCD and the appropriate Renesas device support for SWD work.
 
-The current BL dependency baseline is libs 0.10.0, flash tools 0.2.0, and GCC RISC-V 14.3.0. A dependency rebuild uses the builder's separate pinned environment.
+The current BL dependency baseline is libs 0.11.0, flash tools 0.2.1, bouffalo_sdk v2.3.38 and GCC RISC-V 14.3.0. A dependency rebuild uses the builder's separate pinned environment.
 
 ## Local environment
 
