@@ -6,6 +6,16 @@
 
 An application bridge for the Arduino UNO R4 WiFi. It connects the RA4M1 application MCU with a BouffaloLab BL616CL wireless MCU and exposes a WiFiS3-compatible interface over the board's existing connections.
 
+## Explore the bridge
+
+[**Open Bridge Explorer →**](https://bouffalolab.github.io/arduino-bouffalo-uno-r4-wifi-usb-bridge/)
+
+An interactive Chinese/English guide to the board, USB and AT paths, Wi-Fi, BLE,
+CMSIS-DAP and the PhoneMatrix example. Rotate the illustrated board, follow
+protocol replays and draw a 12×8 matrix frame in your browser. Replays are
+illustrations, not hardware logs; the site neither connects to a board nor
+changes the firmware release status. Site maintenance: [site/README.md](site/README.md).
+
 ## Features
 
 - USB serial communication between the host, RA4M1, and BL616CL.

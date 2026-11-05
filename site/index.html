@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f4ed">
+  <meta name="description" content="交互式认识 UNO R4 WiFi 上的 BL616CL bridge：USB、Wi-Fi、BLE、AT 与 CMSIS-DAP。Explore the bridge one signal path at a time.">
+  <title>UNO R4 WiFi × BL616CL · Bridge Explorer</title>
+  <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg">
+  <link rel="stylesheet" href="./assets/style.css">
+  <script type="module" src="./assets/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#lesson-panel">跳到课程 / Skip to lesson</a>
+  <header class="header">
+    <a class="brand" href="#board" aria-label="Bridge Explorer"><span class="brand-mark">b<span>↗</span></span><span>BRIDGE<span class="brand-sub">EXPLORER / BOUFFALO LAB</span></span></a>
+    <div class="header-copy"><strong>UNO R4 WiFi <span>×</span> BL616CL</strong><span id="tagline"></span></div>
+    <nav class="top-nav" aria-label="Main navigation">
+      <a href="#support" id="support-link"></a>
+      <a href="https://github.com/bouffalolab/arduino-bouffalo-uno-r4-wifi-usb-bridge" id="repo-link">GitHub ↗</a>
+      <button id="language" type="button"></button>
+    </nav>
+  </header>
+  <main class="workspace">
+    <section class="stage" aria-labelledby="stage-title">
+      <div class="stage-top"><div><span class="eyebrow">THE HARDWARE, UNPACKED</span><h1 id="stage-title"></h1></div><span class="candidate" id="release-note"></span></div>
+      <div class="viewport"><svg id="board-svg" role="img" aria-label="UNO R4 WiFi with BL616CL module, interactive isometric illustration"></svg></div>
+      <div class="stage-bottom"><div class="legend" id="legend"></div><div class="board-controls">
+        <button type="button" data-board="left"></button><button type="button" data-board="right"></button><span class="divider"></span>
+        <button type="button" data-board="out">−</button><button type="button" data-board="in">+</button><button type="button" data-board="reset"></button>
+        <span class="divider"></span><button type="button" data-board="labels" aria-pressed="true"></button><button type="button" data-board="paths" aria-pressed="true"></button>
+      </div><p class="stage-hint" id="stage-hint"></p></div>
+      <div class="part-popover" id="part-popover" hidden><div><strong id="part-title"></strong><button type="button" id="close-part">×</button></div><p id="part-text"></p></div>
+      <span class="drawing-note" id="drawing-note"></span>
+    </section>
+    <section class="lesson-panel" id="lesson-panel" aria-labelledby="lesson-title">
+      <div class="lesson-meta"><span class="eyebrow" id="lesson-number"></span><span id="lesson-status"></span></div>
+      <h2 id="lesson-title"></h2>
+      <div class="tabs" role="tablist" aria-label="Lesson sections"><button id="tab-learn" role="tab" aria-controls="pane-learn" aria-selected="true" tabindex="0" data-tab="learn"></button><button id="tab-code" role="tab" aria-controls="pane-code" aria-selected="false" tabindex="-1" data-tab="code"></button><button id="tab-pins" role="tab" aria-controls="pane-pins" aria-selected="false" tabindex="-1" data-tab="pins"></button></div>
+      <div class="lesson-scroll">
+        <div id="pane-learn" class="pane" role="tabpanel" aria-labelledby="tab-learn"><p id="lesson-lead"></p><ul id="lesson-points"></ul><div id="support-table"></div><div id="lesson-links" class="doc-links"></div></div>
+        <div id="pane-code" class="pane" role="tabpanel" aria-labelledby="tab-code" hidden><div class="code-header"><span id="code-lang"></span><button id="copy-code" type="button"></button></div><pre><code id="code"></code></pre><div id="code-source" class="doc-links"></div></div>
+        <div id="pane-pins" class="pane" role="tabpanel" aria-labelledby="tab-pins" hidden><p id="pin-note"></p><div class="table-scroll"><table id="pin-table"></table></div></div>
+      </div>
+      <section id="matrix-editor" class="matrix-editor" hidden aria-labelledby="matrix-title"><div class="mini-heading"><h3 id="matrix-title"></h3><span class="sim-label" id="matrix-sim-label"></span></div><div class="presets" id="presets"></div><div class="matrix-grid" id="matrix-grid" role="group"></div><p id="matrix-hint" class="muted"></p><label id="payload-label" for="matrix-payload"></label><output id="matrix-payload"></output><button id="matrix-send" class="primary" type="button"></button></section>
+      <section class="replay" id="replay" aria-labelledby="replay-heading"><div class="replay-head"><div><h3 id="replay-heading"></h3><span class="sim-label" id="replay-note"></span></div><button class="play" id="play" type="button"></button></div><div class="terminal" id="terminal" role="log" aria-live="polite" tabindex="0"></div></section>
+      <div class="lesson-footer"><button type="button" id="prev"></button><span id="lesson-count"></span><button type="button" id="next"></button></div>
+    </section>
+  </main>
+  <section class="curriculum" aria-labelledby="curriculum-title"><div class="curriculum-top"><h2 id="curriculum-title"></h2><span id="progress" aria-live="polite"></span></div><nav id="lessons" aria-label="Lessons"></nav></section>
+  <footer class="site-footer"><p id="footer-text"></p><p><span id="credit"></span> <a href="https://learn-arduino-red.vercel.app/">learn-arduino ↗</a></p><p><span id="trademark"></span> <span id="license"></span></p><div><a href="https://github.com/bouffalolab/arduino-bouffalo-uno-r4-wifi-usb-bridge">BRIDGE ↗</a><a href="https://github.com/bouffalolab/arduino-bouffalo">ARDUINO CORE ↗</a><a href="https://github.com/bouffalolab/arduino-bouffalo-lib-builder">LIB BUILDER ↗</a></div></footer>
+  <noscript>此网站需要 JavaScript 显示交互课程。This site needs JavaScript for interactive lessons. <a href="https://github.com/bouffalolab/arduino-bouffalo-uno-r4-wifi-usb-bridge">Read the repository documentation.</a></noscript>
+</body>
+</html>
