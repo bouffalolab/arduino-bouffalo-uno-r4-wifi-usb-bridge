@@ -1,0 +1,20 @@
+<resources>
+    <color name="page">#F5F6F2</color>
+    <color name="ink">#203B36</color>
+    <color name="muted">#62736C</color>
+    <color name="accent">#176B59</color>
+    <color name="mint">#E7F3EC</color>
+    <color name="line">#E4E9E3</color>
+    <color name="input">#F7F9F6</color>
+    <color name="key">#F6F8F4</color>
+    <color name="play">#F1F4F8</color>
+    <color name="attention">#FFEFEB</color>
+    <color name="error">#AE433E</color>
+    <color name="heart">#FFEDF1</color>
+    <color name="smile">#FFF7DB</color>
+    <color name="checker">#EEF1FB</color>
+    <color name="clear">#E7F5F1</color>
+    <color name="white">#FFFFFF</color>
+    <color name="ripple">#25176B59</color>
+    <color name="transparent">#00000000</color>
+</resources>

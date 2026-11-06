@@ -1,0 +1,228 @@
+{
+  "protocol": "ARDUINO-57 PhoneMatrix",
+  "document_version": "1.0",
+  "rows": 8,
+  "columns": 12,
+  "packing": "row-major, MSB-first, no per-row padding",
+  "validity": "Firmware handler reference vectors; invalid ATT delivery is not guaranteed. New Android app/hardware not tested.",
+  "vectors": [
+    {
+      "name": "clear",
+      "hex": "00",
+      "length": 1,
+      "expected_status": "OK:CLEAR",
+      "rows": [
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "heart",
+      "hex": "01",
+      "length": 1,
+      "expected_status": "OK:HEART",
+      "rows": [
+        "000110011000",
+        "001111111100",
+        "001111111100",
+        "001111111100",
+        "000111111000",
+        "000011110000",
+        "000001100000",
+        "000000000000"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "smile",
+      "hex": "02",
+      "length": 1,
+      "expected_status": "OK:SMILE",
+      "rows": [
+        "000000000000",
+        "000110011000",
+        "000110011000",
+        "000000000000",
+        "000000000000",
+        "001000000100",
+        "000100001000",
+        "000011110000"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "checker",
+      "hex": "03",
+      "length": 1,
+      "expected_status": "OK:CHECKER",
+      "rows": [
+        "101010101010",
+        "010101010101",
+        "101010101010",
+        "010101010101",
+        "101010101010",
+        "010101010101",
+        "101010101010",
+        "010101010101"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "raw-off",
+      "hex": "10 00 00 00 00 00 00 00 00 00 00 00 00",
+      "length": 13,
+      "expected_status": "OK:RAW",
+      "rows": [
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "raw-on",
+      "hex": "10 FF FF FF FF FF FF FF FF FF FF FF FF",
+      "length": 13,
+      "expected_status": "OK:RAW",
+      "rows": [
+        "111111111111",
+        "111111111111",
+        "111111111111",
+        "111111111111",
+        "111111111111",
+        "111111111111",
+        "111111111111",
+        "111111111111"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "raw-corners",
+      "hex": "10 80 00 00 00 00 00 00 00 00 00 00 01",
+      "length": 13,
+      "expected_status": "OK:RAW",
+      "rows": [
+        "100000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000000",
+        "000000000001"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "raw-checker",
+      "hex": "10 AA A5 55 AA A5 55 AA A5 55 AA A5 55",
+      "length": 13,
+      "expected_status": "OK:RAW",
+      "rows": [
+        "101010101010",
+        "010101010101",
+        "101010101010",
+        "010101010101",
+        "101010101010",
+        "010101010101",
+        "101010101010",
+        "010101010101"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "raw-heart",
+      "hex": "10 19 83 FC 3F C3 FC 1F 80 F0 06 00 00",
+      "length": 13,
+      "expected_status": "OK:RAW",
+      "rows": [
+        "000110011000",
+        "001111111100",
+        "001111111100",
+        "001111111100",
+        "000111111000",
+        "000011110000",
+        "000001100000",
+        "000000000000"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "raw-smile",
+      "hex": "10 00 01 98 19 80 00 00 02 04 10 80 F0",
+      "length": 13,
+      "expected_status": "OK:RAW",
+      "rows": [
+        "000000000000",
+        "000110011000",
+        "000110011000",
+        "000000000000",
+        "000000000000",
+        "001000000100",
+        "000100001000",
+        "000011110000"
+      ],
+      "expected_display": "replace"
+    },
+    {
+      "name": "empty",
+      "hex": "",
+      "length": 0,
+      "expected_status": "ERR:LENGTH",
+      "expected_display": "unchanged",
+      "note": "Handler-level expected result; Android or ATT can reject invalid writes before the handler."
+    },
+    {
+      "name": "raw-short",
+      "hex": "10",
+      "length": 1,
+      "expected_status": "ERR:COMMAND",
+      "expected_display": "unchanged",
+      "note": "Handler-level expected result; Android or ATT can reject invalid writes before the handler."
+    },
+    {
+      "name": "unknown",
+      "hex": "7F",
+      "length": 1,
+      "expected_status": "ERR:COMMAND",
+      "expected_display": "unchanged",
+      "note": "Handler-level expected result; Android or ATT can reject invalid writes before the handler."
+    },
+    {
+      "name": "preset-extra",
+      "hex": "01 00",
+      "length": 2,
+      "expected_status": "ERR:COMMAND",
+      "expected_display": "unchanged",
+      "note": "Handler-level expected result; Android or ATT can reject invalid writes before the handler."
+    },
+    {
+      "name": "ascii-heart",
+      "hex": "30 31",
+      "length": 2,
+      "expected_status": "ERR:COMMAND",
+      "expected_display": "unchanged",
+      "note": "Handler-level expected result; Android or ATT can reject invalid writes before the handler."
+    },
+    {
+      "name": "raw-two-bytes",
+      "hex": "10 00",
+      "length": 2,
+      "expected_status": "ERR:COMMAND",
+      "expected_display": "unchanged",
+      "note": "Handler-level expected result; Android or ATT can reject invalid writes before the handler."
+    }
+  ]
+}

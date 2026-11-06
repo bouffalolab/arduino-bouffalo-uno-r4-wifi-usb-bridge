@@ -1,0 +1,28 @@
+{
+  "source": "User-provided color_pixel_icons.zip",
+  "archive_sha256": "f011c2c2a3e2635934a6b57148c23e8ee9159742be4ce94184becc38f0e6e27f",
+  "license": "User supplied for this app; no separate license asserted.",
+  "assets": [
+    {
+      "action": "Heart",
+      "archive_entry": "png_32/heart.png",
+      "resource": "pixel_heart.png",
+      "sha256": "f699e57b359a33fc9396b2a13ecc5e225519113283616107ac267fb9e96d639f",
+      "modification": "None; original 32x32 RGBA PNG copied unchanged."
+    },
+    {
+      "action": "Smile",
+      "archive_entry": "png_32/smile.png",
+      "resource": "pixel_smile.png",
+      "sha256": "0ca80f47777a5d14df0f195c07ebce4eb832421b33e545b581788c084d512c1d",
+      "modification": "None; original 32x32 RGBA PNG copied unchanged."
+    },
+    {
+      "action": "Clear",
+      "archive_entry": "png_32/trash.png",
+      "resource": "pixel_clear.png",
+      "sha256": "10c1ea6ecb55668656b98ef4e065ffc8df41c6c7f616d36f2c25fc2b177ebcd4",
+      "modification": "None; original 32x32 RGBA PNG copied unchanged."
+    }
+  ]
+}

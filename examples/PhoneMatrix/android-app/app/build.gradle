@@ -1,0 +1,12 @@
+plugins { id 'com.android.application' }
+
+android { namespace 'com.example.phonematrix'; compileSdk 35
+    defaultConfig { applicationId 'com.example.phonematrix'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0'; testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner' }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.5.2'
+    androidTestImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+}

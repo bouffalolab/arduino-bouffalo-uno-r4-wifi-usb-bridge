@@ -1,0 +1,57 @@
+{
+  "repository": "https://github.com/tstamborski/pixelart-icons",
+  "commit": "aff260c021f9a8053719de0113cd59e428c87eca",
+  "license": "CC0-1.0",
+  "assets": [
+    {
+      "action_resource": "pixel_heart.png",
+      "source": "https://raw.githubusercontent.com/tstamborski/pixelart-icons/aff260c021f9a8053719de0113cd59e428c87eca/png/heart16.png",
+      "original_sha256": "18c3e1757c6fc9148dde817c8944c73d3126fe5c2279d3889875d61b9ed7c064",
+      "resource_sha256": "18c3e1757c6fc9148dde817c8944c73d3126fe5c2279d3889875d61b9ed7c064",
+      "modification": "None; original PNG copied unchanged."
+    },
+    {
+      "action_resource": "pixel_smile.png",
+      "source": "https://raw.githubusercontent.com/tstamborski/pixelart-icons/aff260c021f9a8053719de0113cd59e428c87eca/png/happy16.png",
+      "original_sha256": "9a741bca8313bdefce933291dbfbadd0987a7dd28cdd7691df5341c00fc239f3",
+      "resource_sha256": "9a741bca8313bdefce933291dbfbadd0987a7dd28cdd7691df5341c00fc239f3",
+      "modification": "None; original PNG copied unchanged."
+    },
+    {
+      "action_resource": "pixel_grid.png",
+      "source": "https://raw.githubusercontent.com/tstamborski/pixelart-icons/aff260c021f9a8053719de0113cd59e428c87eca/png/grid16.png",
+      "original_sha256": "0fecd2920a733818ea85478ad28473dd5f72aca799f17e4af0afcbfcfb4e60e6",
+      "resource_sha256": "0fecd2920a733818ea85478ad28473dd5f72aca799f17e4af0afcbfcfb4e60e6",
+      "modification": "None; original PNG copied unchanged."
+    },
+    {
+      "action_resource": "pixel_clear.png",
+      "source": "https://raw.githubusercontent.com/tstamborski/pixelart-icons/aff260c021f9a8053719de0113cd59e428c87eca/png/bin16.png",
+      "original_sha256": "5cb1f6e8d05bbb8d232e12adf380ae8a1049d6b873937cc9ae1b97258b0b7aae",
+      "resource_sha256": "5cb1f6e8d05bbb8d232e12adf380ae8a1049d6b873937cc9ae1b97258b0b7aae",
+      "modification": "None; original PNG copied unchanged."
+    },
+    {
+      "action_resource": "pixel_send.png",
+      "source": "https://raw.githubusercontent.com/tstamborski/pixelart-icons/aff260c021f9a8053719de0113cd59e428c87eca/png/arrow-right16.png",
+      "original_sha256": "2a913faf7a0cd3859d100077703c7b4e1c026e86c05a43beec915adf0b68371e",
+      "resource_sha256": "2a913faf7a0cd3859d100077703c7b4e1c026e86c05a43beec915adf0b68371e",
+      "modification": "None; original PNG copied unchanged."
+    },
+    {
+      "action_resource": "pixel_play.png",
+      "source": "https://raw.githubusercontent.com/tstamborski/pixelart-icons/aff260c021f9a8053719de0113cd59e428c87eca/png/play16.png",
+      "original_sha256": "923523252f474d9f19b91cd9f42ca0b56b5484e3220b861b88d00af748227826",
+      "resource_sha256": "de0f1eb29d90aff7043c9ab82b7505716fa53adbe4bd98751a115a521a521dc7",
+      "modification": "Opaque artwork recolored green; original alpha preserved."
+    },
+    {
+      "action_resource": "pixel_stop.png",
+      "source": "https://raw.githubusercontent.com/tstamborski/pixelart-icons/aff260c021f9a8053719de0113cd59e428c87eca/png/stop16.png",
+      "original_sha256": "e88c71a3d19840b3315f2f5f7d551bc7dc13983eb0da04f4f03f66b9f9b08842",
+      "resource_sha256": "0ae6d0898f5cd24ad355ba1c81f72e6daba4de04ef63b93d19d0f3d8d17cacf6",
+      "modification": "Opaque artwork recolored red; original alpha preserved."
+    }
+  ],
+  "current_usage_note": "Historical import record. Heart, Smile and Clear resources have been superseded by user-provided assets; their hashes below describe the earlier imported files. Grid, Send, Play and Stop remain in use."
+}
