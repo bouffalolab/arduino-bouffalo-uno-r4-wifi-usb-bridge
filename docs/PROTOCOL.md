@@ -65,3 +65,26 @@ PhoneMatrix is an RA4M1 ArduinoBLE GATT application. Its service and binary comm
 format are documented in [the example guide](../examples/README.md). They are not
 AT commands or features coupled into the Core. For platform installation, support,
 security limits and recovery, see the platform repository's versioned `docs/`.
+
+## BL616CL application update (experimental)
+
+These bridge commands forward the platform `BLUpdate` API; they update the BL
+application, not RA4 firmware. They are not Arduino UNO's `OTAUpdate` modem
+protocol. A host must supply the `.bin.blfota` header and raw image bytes.
+Although some command names match the earlier arduino-bouffalo PR #16, their
+arguments, image framing and finish/commit sequence differ. Its host sender is
+not compatible without adaptation.
+
+| Request | Contract |
+| --- | --- |
+| `AT+BLFOTABEGIN=512` then 512 raw bytes | Validate the image header and start a session |
+| `AT+BLFOTADATA=offset,n` then n raw bytes | Write the next chunk, 1–1024 bytes; the first chunk must be at least 256 bytes |
+| `AT+BLFOTAFINISH` | Verify the complete image's SHA-256; do not change the active slot |
+| `AT+BLFOTACOMMIT` | Select the verified slot, acknowledge, and reset the BL chip |
+| `AT+BLFOTAABORT` | Abandon an uncommitted session |
+
+Successful requests return `+BLFOTA...: 0\r\nOK\r\n`; failures return the
+normal command error. A failed/short data frame aborts the session. The host
+must handle timeouts and retransmission as a new session, rather than duplicate
+offsets. This adapter has compiled but has not been tested through an actual
+RA4 host. See the platform BLUpdate README for layout and security limitations.

@@ -9,6 +9,10 @@
 #include <BLEController.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <BLUpdate.h>
+extern "C" {
+#include "bl616cl_sys.h"
+}
 
 #include "bridge_version.h"
 #define FW_VERSION         BRIDGE_VERSION_STRING /* Firmware version returned by AT+FWVERSION. */
@@ -2182,10 +2186,55 @@ static void cmd_restartbootloader(Stream &io, const char *name, char op, char *a
     resetToBootloader();
 }
 
+/** @brief Receive the chip-labelled 512-byte BL firmware update header. */
+static void cmd_blfotabegin(Stream &io, const char *name, char op, char *args)
+{
+    long length;
+    if (op != '=' || !parse_long(args, &length) || length < 0) { reply_error(io, name); return; }
+    if (length != 512) { read_payload(io, length, nullptr); reply_error(io, name); return; }
+    if (io.readBytes(data, length) != (size_t)length || !BLUpdate.begin(data, length)) {
+        BLUpdate.abort(); reply_error(io, name); return;
+    }
+    reply_int(io, name, 0);
+}
+
+/** @brief Receive one ordered raw update chunk before writing it to flash. */
+static void cmd_blfotadata(Stream &io, const char *name, char op, char *args)
+{
+    char *argv[3]; long offset, length;
+    int count = split(args, argv, 3);
+    if (op != '=' || count != 2 || !parse_long(argv[0], &offset) ||
+        !parse_long(argv[1], &length) || length < 0) { reply_error(io, name); return; }
+    if (offset < 0 || length == 0 || length > 1024) {
+        read_payload(io, length, nullptr); BLUpdate.abort(); reply_error(io, name); return;
+    }
+    if (io.readBytes(data, length) != (size_t)length || !BLUpdate.write(offset, data, length)) {
+        BLUpdate.abort(); reply_error(io, name); return;
+    }
+    reply_int(io, name, 0);
+}
+
+/** @brief Verify, commit, or abort a platform firmware update session. */
+static void cmd_blfotacontrol(Stream &io, const char *name, char op, char *args)
+{
+    (void)args;
+    if (op != '\0') { reply_error(io, name); return; }
+    if (!strcmp(name, "+BLFOTAABORT")) { BLUpdate.abort(); reply_int(io, name, 0); return; }
+    bool commit = !strcmp(name, "+BLFOTACOMMIT");
+    if (!(commit ? BLUpdate.commit() : BLUpdate.finish())) { reply_error(io, name); return; }
+    reply_int(io, name, 0);
+    if (commit) { io.flush(); bl_sys_reset_por(); }
+}
+
 static const struct {
     const char *name;
     handler_t handler;
 } commands[] = {
+    { "+BLFOTABEGIN", cmd_blfotabegin },
+    { "+BLFOTADATA", cmd_blfotadata },
+    { "+BLFOTAFINISH", cmd_blfotacontrol },
+    { "+BLFOTACOMMIT", cmd_blfotacontrol },
+    { "+BLFOTAABORT", cmd_blfotacontrol },
     { "+PREFBEGIN", cmd_prefbegin },
     { "+PREFEND", cmd_prefcontrol },
     { "+PREFCLEAR", cmd_prefcontrol },
